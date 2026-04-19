@@ -1,0 +1,15 @@
+# Build artifacts
+*.o
+*.elf
+*.raw
+*.map
+game.iso
+game.cue
+build/
+cd/0.bin
+
+# WAV audio tracks (user-supplied)
+TRACK*.WAV
+
+# Music source files
+music/

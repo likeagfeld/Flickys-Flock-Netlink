@@ -35,6 +35,8 @@
  */
 
 #include "main.h"
+#include "net/flock_net.h"
+#include "net/saturn_uart16550.h"
 
 //
 // globals
@@ -53,6 +55,86 @@ FLICKY g_Players[MAX_PLAYERS] = {0};
 PIPE g_Pipes[MAX_PIPES] = {0};
 POWERUP g_PowerUps[MAX_POWER_UPS] = {0};
 unsigned int g_StartingPositions[MAX_PLAYERS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+
+/*============================================================================
+ * Saturn UART + Transport globals (used by connecting.c)
+ *============================================================================*/
+
+saturn_uart16550_t g_uart = {0};
+bool g_modem_detected = false;
+
+/* NetLink board control register for LED blinking */
+#define NETLINK_BOARD_CTRL  (*(volatile uint8_t*)0x25885031)
+#define NETLINK_BUS_STROBE  (*(volatile uint8_t*)0x2582503D)
+
+static int g_led_counter = 0;
+
+static bool saturn_transport_rx_ready(void* ctx)
+{
+    return saturn_uart_rx_ready((saturn_uart16550_t*)ctx);
+}
+
+static uint8_t saturn_transport_rx_byte(void* ctx)
+{
+    saturn_uart16550_t* u = (saturn_uart16550_t*)ctx;
+    return (uint8_t)saturn_uart_reg_read(u, SATURN_UART_RBR);
+}
+
+static int saturn_transport_send(void* ctx, const uint8_t* data, int len)
+{
+    saturn_uart16550_t* u = (saturn_uart16550_t*)ctx;
+    int i;
+    for (i = 0; i < len; i++) {
+        if (!saturn_uart_putc(u, data[i])) return i;
+    }
+    return len;
+}
+
+net_transport_t g_saturn_transport = {
+    saturn_transport_rx_ready,
+    saturn_transport_rx_byte,
+    saturn_transport_send,
+    (void*)0,  /* is_connected = NULL */
+    (void*)0,  /* ctx = set later to &g_uart */
+};
+
+/*============================================================================
+ * Network tick callback (runs every frame, all game states)
+ *============================================================================*/
+
+void network_tick(void)
+{
+    fnet_tick();
+
+    /* LED blink: only during online gameplay with modem present */
+    if (g_Game.gameState == GAMESTATE_GAMEPLAY &&
+        g_Game.isOnlineMode && g_modem_detected)
+    {
+        g_led_counter++;
+        if (g_led_counter >= 40)
+            g_led_counter = 0;
+
+        if (g_led_counter == 0) {
+            uint8_t val = NETLINK_BOARD_CTRL;
+            NETLINK_BUS_STROBE = 0;
+            NETLINK_BOARD_CTRL = val | 0x80u;
+            NETLINK_BUS_STROBE = 0;
+        } else if (g_led_counter == 10) {
+            uint8_t val = NETLINK_BOARD_CTRL;
+            NETLINK_BUS_STROBE = 0;
+            NETLINK_BOARD_CTRL = val & 0x7Fu;
+            NETLINK_BUS_STROBE = 0;
+        }
+    }
+    else if (g_led_counter != 0)
+    {
+        uint8_t val = NETLINK_BOARD_CTRL;
+        NETLINK_BUS_STROBE = 0;
+        NETLINK_BOARD_CTRL = val & 0x7Fu;
+        NETLINK_BUS_STROBE = 0;
+        g_led_counter = 0;
+    }
+}
 
 void jo_main(void)
 {
@@ -86,6 +168,20 @@ void jo_main(void)
     jo_core_add_callback(titleScreen_draw);
     jo_core_add_callback(titleScreen_input);
 
+    // name entry (online)
+    jo_core_add_callback(nameEntry_input);
+    jo_core_add_callback(nameEntry_draw);
+
+    // connecting (online)
+    jo_core_add_callback(connecting_input);
+    jo_core_add_callback(connecting_update);
+    jo_core_add_callback(connecting_draw);
+
+    // lobby (online)
+    jo_core_add_callback(lobby_input);
+    jo_core_add_callback(lobby_update);
+    jo_core_add_callback(lobby_draw);
+
     // gameplay
     jo_core_add_callback(gameplay_draw);
     jo_core_add_callback(gameplay_input);
@@ -95,8 +191,41 @@ void jo_main(void)
     jo_core_add_callback(gameOver_input);
     jo_core_add_callback(gameOver_draw);
 
+    // network tick runs every frame
+    jo_core_add_callback(network_tick);
+
     // debug info
     //jo_core_add_callback(debugInfo);
+
+    //
+    // Initialize networking
+    //
+
+    fnet_init();
+
+    // Set up transport context
+    g_saturn_transport.ctx = &g_uart;
+
+    // Detect modem hardware (non-blocking, does NOT dial)
+    saturn_netlink_smpc_enable();
+    {
+        static const struct { uint32_t base; uint32_t stride; } addrs[] = {
+            { 0x25895001, 4 },
+            { 0x04895001, 4 },
+        };
+        int i;
+
+        g_modem_detected = false;
+        for (i = 0; i < 2; i++) {
+            g_uart.base = addrs[i].base;
+            g_uart.stride = addrs[i].stride;
+            if (saturn_uart_detect(&g_uart)) {
+                g_modem_detected = true;
+                break;
+            }
+        }
+    }
+    fnet_set_modem_available(g_modem_detected);
 
     g_Game.gameState = GAMESTATE_SSMTF_LOGO;
 
@@ -147,6 +276,19 @@ void debugInfo(void)
 // exits to title screen if player one presses ABC+Start
 void abcStart_gamepad(void)
 {
+    if (g_Game.gameState == GAMESTATE_UNINITIALIZED) return;
+    if (g_Game.gameState == GAMESTATE_TITLE_SCREEN) return;
+
+    // If online, send disconnect first
+    if (g_Game.isOnlineMode) {
+        fnet_send_disconnect();
+        g_Game.isOnlineMode = false;
+    }
+
+    g_Game.input.pressedStart = true;
+    g_Game.input.pressedABC = true;
+    g_Game.input.pressedLT = true;
+
     transitionToTitleScreen();
     return;
 }
@@ -264,10 +406,15 @@ void titleScreen_draw(void)
     // floor
     drawTitleFlickys();
 
-    // lives, position, and start text
-    jo_sprite_draw3D(g_Assets.livesSprite, -100, TITLE_SCREEN_OPTIONS_Y, 500);
-    jo_sprite_draw3D(g_Assets.positionSprite, -10, TITLE_SCREEN_OPTIONS_Y, 500);
-    jo_sprite_draw3D(g_Assets.startSprite, 100, TITLE_SCREEN_OPTIONS_Y, 500);
+    // lives, position, start text, and online option
+    jo_sprite_draw3D(g_Assets.livesSprite, -120, TITLE_SCREEN_OPTIONS_Y, 500);
+    jo_sprite_draw3D(g_Assets.positionSprite, -40, TITLE_SCREEN_OPTIONS_Y, 500);
+    jo_sprite_draw3D(g_Assets.startSprite, 60, TITLE_SCREEN_OPTIONS_Y, 500);
+
+    // ONLINE text as sprite (matches title screen style)
+    if (g_modem_detected) {
+        jo_sprite_draw3D(g_Assets.onlineSprite, 130, TITLE_SCREEN_OPTIONS_Y, 500);
+    }
 
     int livesSprite = 0;
     switch(g_Game.numLivesChoice)
@@ -298,7 +445,7 @@ void titleScreen_draw(void)
     }
 
     // number of lives text (infinite, 1, 3, 5, 9)
-    jo_sprite_draw3D(livesSprite, -70, TITLE_SCREEN_OPTIONS_Y, 500);
+    jo_sprite_draw3D(livesSprite, -90, TITLE_SCREEN_OPTIONS_Y, 500);
 
     int startingPositionSprite = 0;
     switch(g_Game.startingPositionChoice)
@@ -317,7 +464,7 @@ void titleScreen_draw(void)
     }
 
     // starting position choice (fixed or rand)
-    jo_sprite_draw3D(startingPositionSprite, 25, TITLE_SCREEN_OPTIONS_Y, 500);
+    jo_sprite_draw3D(startingPositionSprite, -5, TITLE_SCREEN_OPTIONS_Y, 500);
 
     // check if we need to flap
     if(g_Game.frame >= FLICKY_FLAPPING_SPEED)
@@ -327,22 +474,26 @@ void titleScreen_draw(void)
     }
 
     int titleFlickyOffset = 0;
+    int maxTitleChoice = g_modem_detected ? 3 : 2;
     switch(g_Game.titleScreenChoice)
     {
         case 0:
-            titleFlickyOffset = -134;
+            titleFlickyOffset = -154;
             break;
 
         case 1:
-            titleFlickyOffset = -36;
+            titleFlickyOffset = -68;
             break;
 
         case 2:
-            titleFlickyOffset = 69;
+            titleFlickyOffset = 30;
+            break;
+
+        case 3:
+            titleFlickyOffset = 114;
             break;
 
         default:
-            // should be impossible!
             titleFlickyOffset = 0;
             break;
     }
@@ -442,14 +593,17 @@ void titleScreen_input(void)
     }
 
     // validate the title screen choices
-    if(titleScreenChoice < 0)
     {
-        titleScreenChoice = 2;
-    }
+        int maxChoice = g_modem_detected ? 3 : 2;
+        if(titleScreenChoice < 0)
+        {
+            titleScreenChoice = maxChoice;
+        }
 
-    if(titleScreenChoice > 2)
-    {
-        titleScreenChoice = 0;
+        if(titleScreenChoice > maxChoice)
+        {
+            titleScreenChoice = 0;
+        }
     }
     g_Game.titleScreenChoice = titleScreenChoice;
 
@@ -458,12 +612,36 @@ void titleScreen_input(void)
         jo_is_pad1_key_pressed(JO_KEY_B) ||
         jo_is_pad1_key_pressed(JO_KEY_C))
     {
-        if(g_Game.titleScreenChoice == 2)
+        if(g_Game.titleScreenChoice == 3 && g_modem_detected)
+        {
+            // ONLINE
+            if(g_Game.input.pressedABC == false)
+            {
+                g_Game.input.pressedABC = true;
+                g_Game.isOnlineMode = true;
+                jo_clear_screen();
+
+                // If still connected to server, skip straight to lobby
+                if (fnet_get_state() == FNET_STATE_LOBBY)
+                {
+                    g_Game.gameState = GAMESTATE_LOBBY;
+                    lobby_init();
+                }
+                else
+                {
+                    g_Game.gameState = GAMESTATE_NAME_ENTRY;
+                    nameEntry_init();
+                }
+                return;
+            }
+        }
+        else if(g_Game.titleScreenChoice == 2)
         {
             if(g_Game.input.pressedABC == false)
             {
                 g_Game.gameState = GAMESTATE_GAMEPLAY;
                 g_Game.input.pressedABC = true;
+                g_Game.isOnlineMode = false;
                 transitionToGameplay(true);
                 return;
             }
@@ -623,22 +801,46 @@ void gameplay_draw(void)
         }
     }
 
-    // check if all players are dead
-    allDead = areAllPlayersDead();
-    if(allDead == true)
+    // check if all players are dead (local mode only; online uses server GAME_OVER)
+    if (!g_Game.isOnlineMode)
     {
-        g_Game.frameDeathTimer++;
-    }
-    else
-    {
-        g_Game.frameDeathTimer = 0;
+        allDead = areAllPlayersDead();
+        if(allDead == true)
+        {
+            g_Game.frameDeathTimer++;
+        }
+        else
+        {
+            g_Game.frameDeathTimer = 0;
+        }
+
+        // check if all players are dead for enough time to end the game
+        if(g_Game.frameDeathTimer >= ALL_DEAD_FRAME_TIMER)
+        {
+            transitionToGameOverOrPause(false);
+            return;
+        }
     }
 
-    // check if all players are dead for enough time to end the game
-    if(g_Game.frameDeathTimer >= ALL_DEAD_FRAME_TIMER)
+    // calculate progressive pipe speed for this frame (once per frame)
     {
-        transitionToGameOverOrPause(false);
-        return;
+        int pipeMovement;
+        g_Game.pipeSpeedAccum += g_Game.pipeSpeed;
+        pipeMovement = g_Game.pipeSpeedAccum >> 8;
+        g_Game.pipeSpeedAccum &= 0xFF;
+
+        // move all pipes by the same amount
+        for(int k = 0; k < MAX_PIPES; k++)
+        {
+            if(g_Pipes[k].state == PIPESTATE_INITIALIZED)
+                g_Pipes[k].x_pos -= pipeMovement;
+        }
+        // move all powerups by the same amount
+        for(int k = 0; k < MAX_POWER_UPS; k++)
+        {
+            if(g_PowerUps[k].state == POWERUP_INITIALIZED)
+                g_PowerUps[k].x_pos -= pipeMovement;
+        }
     }
 
     // draw the pipes
@@ -673,11 +875,17 @@ void gameplay_draw(void)
             }
         }
 
-        // shift the pipe to the left
-        g_Pipes[i].x_pos--;
         if(g_Pipes[i].x_pos < -256)
         {
-            initPipe(&g_Pipes[i]);
+            if (g_Game.isOnlineMode)
+            {
+                // online: server will send new pipe data
+                g_Pipes[i].state = PIPESTATE_UNINITIALIZED;
+            }
+            else
+            {
+                initPipe(&g_Pipes[i]);
+            }
         }
     }
 
@@ -691,19 +899,35 @@ void gameplay_draw(void)
 
         jo_sprite_draw3D(g_Assets.powerUpSprites[g_PowerUps[i].type], g_PowerUps[i].x_pos, g_PowerUps[i].y_pos, g_PowerUps[i].z_pos);
 
-        // shift the power-up to the left
-        g_PowerUps[i].x_pos--;
+        // powerups already moved in the speed calculation block above
         if(g_PowerUps[i].x_pos < -256)
         {
-            initPowerUp(&g_PowerUps[i]);
+            if (g_Game.isOnlineMode)
+            {
+                // online: server will send new powerup data
+                g_PowerUps[i].state = POWERUP_UNINITIALIZED;
+            }
+            else
+            {
+                initPowerUp(&g_PowerUps[i]);
+            }
         }
     }
 
     // draw the floor
     drawFloor();
 
-    // shift the floor
-    g_Game.floorPosition_x--;
+    // shift the floor (using same progressive speed as pipes)
+    {
+        // Use top score to determine floor speed (same formula as pipes)
+        int floorSpeed = g_Game.pipeSpeed;
+        static int floorAccum = 0;
+        int floorMove;
+        floorAccum += floorSpeed;
+        floorMove = floorAccum >> 8;
+        floorAccum &= 0xFF;
+        g_Game.floorPosition_x -= floorMove;
+    }
     if(g_Game.floorPosition_x <= -480)
     {
         g_Game.floorPosition_x = -240;
@@ -715,8 +939,8 @@ void gameplay_draw(void)
     tens = (topScore/10) % 10;
     ones = topScore % 10;
 
-    // check if the player passed 100
-    if(topScore >= VICTORY_CONDITION)
+    // check if the player passed 100 (local mode only; online uses server GAME_OVER)
+    if(!g_Game.isOnlineMode && topScore >= VICTORY_CONDITION)
     {
         g_Game.topScore = topScore;
         transitionToGameOverOrPause(false);
@@ -742,6 +966,128 @@ void gameplay_draw(void)
     return;
 }
 
+// applies physics to a single player (shared by local and online paths)
+static void applyPlayerPhysics(int i, bool flapping)
+{
+    // calculate the player's y speed
+    if(flapping == true)
+    {
+        g_Players[i].flapping = !g_Players[i].flapping;
+        g_Players[i].frameTimer = FLICKY_FLAPPING_SPEED;
+        g_Players[i].y_speed = FLAP_Y_SPEED;
+
+        //
+        // power-ups
+        //
+
+        // stone sneakers make jumps heavier
+        if(g_Players[i].stoneSneakersTimer > 0)
+        {
+            g_Players[i].y_speed += 4;
+        }
+
+        // lightning makes jumps floatier
+        if(g_Players[i].lightningTimer > 0)
+        {
+            g_Players[i].y_speed -= 3;
+        }
+
+        // reverse gravity swaps up and down
+        if(g_Players[i].reverseGravityTimer > 0)
+        {
+            g_Players[i].y_speed *= -1;
+        }
+    }
+    else
+    {
+        // player didn't flap
+        g_Players[i].frameTimer--;
+
+        if(g_Players[i].frameTimer <= 0)
+        {
+            g_Players[i].flapping = !g_Players[i].flapping;
+            g_Players[i].frameTimer = FLICKY_FLAPPING_SPEED;
+        }
+    }
+
+    // adjust the players height, but only if they are active
+    if(g_Players[i].hasFlapped == true)
+    {
+        if(g_Players[i].reverseGravityTimer == 0)
+        {
+            // reverse gravity not enabled
+            g_Players[i].y_pos += g_Players[i].y_speed/5 * 1;
+            g_Players[i].y_speed += FALLING_CONSTANT * 1;
+        }
+        else
+        {
+            // reverse gravity enabled
+            g_Players[i].y_pos += g_Players[i].y_speed/5 * 1;
+            g_Players[i].y_speed -= FALLING_CONSTANT * 1;
+        }
+    }
+
+    // validate speeds
+    if(g_Players[i].y_speed > MAX_Y_SPEED)
+    {
+        g_Players[i].y_speed = MAX_Y_SPEED;
+    }
+
+    if(g_Players[i].reverseGravityTimer > 0)
+    {
+        if(g_Players[i].y_speed < MAX_Y_SPEED * -1)
+        {
+            g_Players[i].y_speed = MAX_Y_SPEED * -1;
+        }
+    }
+
+    g_Players[i].angle = calculateFlickyAngle(g_Players[i].y_speed);
+
+    if(g_Players[i].x_pos > SCREEN_RIGHT)
+    {
+        g_Players[i].x_pos = SCREEN_RIGHT;
+    }
+
+    if(g_Players[i].x_pos < SCREEN_LEFT)
+    {
+        g_Players[i].x_pos = SCREEN_LEFT;
+    }
+
+    if(g_Players[i].y_pos > SCREEN_BOTTOM)
+    {
+        g_Players[i].y_pos = SCREEN_BOTTOM;
+    }
+
+    if(g_Players[i].y_pos < SCREEN_TOP)
+    {
+        g_Players[i].y_pos = SCREEN_TOP;
+    }
+
+    //
+    // decrement power-up timers
+    //
+    if(g_Players[i].stoneSneakersTimer > 0)
+    {
+        g_Players[i].stoneSneakersTimer--;
+    }
+
+    if(g_Players[i].lightningTimer > 0)
+    {
+        g_Players[i].lightningTimer--;
+    }
+
+    if(g_Players[i].reverseGravityTimer > 0)
+    {
+        g_Players[i].reverseGravityTimer--;
+
+        if(g_Players[i].reverseGravityTimer == 0)
+        {
+            // reverse gravity is jarring, so 0 out their speed first
+            g_Players[i].y_speed = 0;
+        }
+    }
+}
+
 // handles the input during gameplay
 void gameplay_input(void)
 {
@@ -749,6 +1095,197 @@ void gameplay_input(void)
     {
         return;
     }
+
+    /*======================================================================
+     * Online mode: only read input for local player, send to server.
+     * Server relays inputs and sends authoritative kill/spawn/score.
+     * We still run local physics for smooth rendering.
+     *======================================================================*/
+    if (g_Game.isOnlineMode)
+    {
+        int myID = (int)g_Game.myPlayerID;
+        uint8_t input_bits = 0;
+
+        g_Game.netFrameCount++;
+
+        // Read local controller input
+        if (jo_is_pad1_key_pressed(JO_KEY_A) ||
+            jo_is_pad1_key_pressed(JO_KEY_B) ||
+            jo_is_pad1_key_pressed(JO_KEY_C))
+        {
+            input_bits |= FNET_INPUT_FLAP;
+        }
+
+        if (jo_is_pad1_key_pressed(JO_KEY_L))
+        {
+            input_bits |= FNET_INPUT_LTRIG;
+        }
+
+        if (jo_is_pad1_key_pressed(JO_KEY_R))
+        {
+            input_bits |= FNET_INPUT_RTRIG;
+        }
+
+        if (jo_is_pad1_key_pressed(JO_KEY_START))
+        {
+            input_bits |= FNET_INPUT_START;
+        }
+
+        // Send input to server (delta-compressed)
+        fnet_send_input_delta((uint16_t)g_Game.netFrameCount, input_bits);
+
+        // Send periodic player state sync
+        fnet_send_player_state();
+
+        // P2 controller hot-plug detection during gameplay
+        if (g_Game.hasSecondLocal && getP2Port() < 0) {
+            g_Game.hasSecondLocal = false;
+            fnet_send_remove_local_player();
+            g_Game.myPlayerID2 = 0xFF;
+        }
+
+        // P2 co-op input handling
+        if (g_Game.hasSecondLocal && g_Game.myPlayerID2 != 0xFF &&
+            g_Game.myPlayerID2 < MAX_PLAYERS)
+        {
+            int p2port = getP2Port();
+            uint8_t p2_bits = 0;
+
+            if (p2port >= 0) {
+                if (jo_is_input_key_down(p2port, JO_KEY_A) ||
+                    jo_is_input_key_down(p2port, JO_KEY_B) ||
+                    jo_is_input_key_down(p2port, JO_KEY_C))
+                    p2_bits |= FNET_INPUT_FLAP;
+                if (jo_is_input_key_down(p2port, JO_KEY_L))
+                    p2_bits |= FNET_INPUT_LTRIG;
+                if (jo_is_input_key_down(p2port, JO_KEY_R))
+                    p2_bits |= FNET_INPUT_RTRIG;
+                if (jo_is_input_key_down(p2port, JO_KEY_START))
+                    p2_bits |= FNET_INPUT_START;
+            }
+
+            fnet_send_input_delta_p2((uint16_t)g_Game.netFrameCount, p2_bits);
+            fnet_send_player_state_p2();
+
+            // Apply P2 local physics
+            {
+                int p2id = (int)g_Game.myPlayerID2;
+                if (g_Players[p2id].state != FLICKYSTATE_UNINITIALIZED &&
+                    g_Players[p2id].state != FLICKYSTATE_DYING)
+                {
+                    bool p2flap = false;
+
+                    // L/R trigger: change character
+                    if (p2_bits & FNET_INPUT_LTRIG) {
+                        if (g_Players[p2id].input.pressedLT == false)
+                            g_Players[p2id].spriteID = getNextFlickySprite(g_Players[p2id].spriteID, -1);
+                        g_Players[p2id].input.pressedLT = true;
+                    } else {
+                        g_Players[p2id].input.pressedLT = false;
+                    }
+
+                    if (p2_bits & FNET_INPUT_RTRIG) {
+                        if (g_Players[p2id].input.pressedRT == false)
+                            g_Players[p2id].spriteID = getNextFlickySprite(g_Players[p2id].spriteID, 1);
+                        g_Players[p2id].input.pressedRT = true;
+                    } else {
+                        g_Players[p2id].input.pressedRT = false;
+                    }
+
+                    // Flap input
+                    if (p2_bits & FNET_INPUT_FLAP) {
+                        if (g_Players[p2id].input.pressedABC == false) {
+                            g_Players[p2id].input.pressedABC = true;
+                            g_Players[p2id].hasFlapped = true;
+                            if (g_Players[p2id].state == FLICKYSTATE_DEAD)
+                                goto online_skip_p2_physics;
+                            p2flap = true;
+                        }
+                    } else {
+                        g_Players[p2id].input.pressedABC = false;
+                    }
+
+                    applyPlayerPhysics(p2id, p2flap);
+                }
+            }
+        }
+online_skip_p2_physics:
+
+        // Apply local input to local player physics
+        if (myID < MAX_PLAYERS &&
+            g_Players[myID].state != FLICKYSTATE_UNINITIALIZED &&
+            g_Players[myID].state != FLICKYSTATE_DYING)
+        {
+            bool flapping = false;
+
+            // L/R trigger: change character
+            if (input_bits & FNET_INPUT_LTRIG)
+            {
+                if (g_Players[myID].input.pressedLT == false)
+                {
+                    g_Players[myID].spriteID = getNextFlickySprite(g_Players[myID].spriteID, -1);
+                }
+                g_Players[myID].input.pressedLT = true;
+            }
+            else
+            {
+                g_Players[myID].input.pressedLT = false;
+            }
+
+            if (input_bits & FNET_INPUT_RTRIG)
+            {
+                if (g_Players[myID].input.pressedRT == false)
+                {
+                    g_Players[myID].spriteID = getNextFlickySprite(g_Players[myID].spriteID, 1);
+                }
+                g_Players[myID].input.pressedRT = true;
+            }
+            else
+            {
+                g_Players[myID].input.pressedRT = false;
+            }
+
+            // Flap input
+            if (input_bits & FNET_INPUT_FLAP)
+            {
+                if (g_Players[myID].input.pressedABC == false)
+                {
+                    g_Players[myID].input.pressedABC = true;
+                    g_Players[myID].hasFlapped = true;
+
+                    // If dead and hit ABC, request respawn (server handles it)
+                    if (g_Players[myID].state == FLICKYSTATE_DEAD)
+                    {
+                        // Server will send PLAYER_SPAWN when ready
+                        goto online_skip_physics;
+                    }
+
+                    flapping = true;
+                }
+            }
+            else
+            {
+                g_Players[myID].input.pressedABC = false;
+            }
+
+            applyPlayerPhysics(myID, flapping);
+        }
+online_skip_physics:
+
+        // Check if server transitioned us out of playing
+        if (fnet_get_state() == FNET_STATE_LOBBY)
+        {
+            // Server sent GAME_OVER, transition to game over screen
+            g_Game.topScore = getTopScore();
+            transitionToGameOverOrPause(false);
+        }
+
+        return;
+    }
+
+    /*======================================================================
+     * Local (offline) mode: original input handling for all 12 players
+     *======================================================================*/
 
     // did player one pause the game?
     if (jo_is_pad1_key_pressed(JO_KEY_START))
@@ -828,123 +1365,7 @@ void gameplay_input(void)
             g_Players[i].input.pressedABC = false;
         }
 
-        // calculate the player's y speed
-        if(flapping == true)
-        {
-            g_Players[i].flapping = !g_Players[i].flapping;
-            g_Players[i].frameTimer = FLICKY_FLAPPING_SPEED;
-            g_Players[i].y_speed = FLAP_Y_SPEED;
-
-            //
-            // power-ups
-            //
-
-            // stone sneakers make jumps heavier
-            if(g_Players[i].stoneSneakersTimer > 0)
-            {
-                g_Players[i].y_speed += 4;
-            }
-
-            // lightning makes jumps floatier
-            if(g_Players[i].lightningTimer > 0)
-            {
-                g_Players[i].y_speed -= 3;
-            }
-
-            // reverse gravity swaps up and down
-            if(g_Players[i].reverseGravityTimer > 0)
-            {
-                g_Players[i].y_speed *= -1;
-            }
-        }
-        else
-        {
-            // player didn't flap
-            g_Players[i].frameTimer--;
-
-            if(g_Players[i].frameTimer <= 0)
-            {
-                g_Players[i].flapping = !g_Players[i].flapping;
-                g_Players[i].frameTimer = FLICKY_FLAPPING_SPEED;
-            }
-        }
-
-        // adjust the players height, but only if they are active
-        if(g_Players[i].hasFlapped == true)
-        {
-            if(g_Players[i].reverseGravityTimer == 0)
-            {
-                // reverse gravity not enabled
-                g_Players[i].y_pos += g_Players[i].y_speed/5 * 1;
-                g_Players[i].y_speed += FALLING_CONSTANT * 1;
-            }
-            else
-            {
-                // reverse gravity enabled
-                g_Players[i].y_pos += g_Players[i].y_speed/5 * 1;
-                g_Players[i].y_speed -= FALLING_CONSTANT * 1;
-            }
-        }
-
-        // validate speeds
-        if(g_Players[i].y_speed > MAX_Y_SPEED)
-        {
-            g_Players[i].y_speed = MAX_Y_SPEED;
-        }
-
-        if(g_Players[i].reverseGravityTimer > 0)
-        {
-            if(g_Players[i].y_speed < MAX_Y_SPEED * -1)
-            {
-                g_Players[i].y_speed = MAX_Y_SPEED * -1;
-            }
-        }
-
-        g_Players[i].angle = calculateFlickyAngle(g_Players[i].y_speed);
-
-        if(g_Players[i].x_pos > SCREEN_RIGHT)
-        {
-            g_Players[i].x_pos = SCREEN_RIGHT;
-        }
-
-        if(g_Players[i].x_pos < SCREEN_LEFT)
-        {
-            g_Players[i].x_pos = SCREEN_LEFT;
-        }
-
-        if(g_Players[i].y_pos > SCREEN_BOTTOM)
-        {
-            g_Players[i].y_pos = SCREEN_BOTTOM;
-        }
-
-        if(g_Players[i].y_pos < SCREEN_TOP)
-        {
-            g_Players[i].y_pos = SCREEN_TOP;
-        }
-
-        //
-        // decrement power-up timers
-        //
-        if(g_Players[i].stoneSneakersTimer > 0)
-        {
-            g_Players[i].stoneSneakersTimer--;
-        }
-
-        if(g_Players[i].lightningTimer > 0)
-        {
-            g_Players[i].lightningTimer--;
-        }
-
-        if(g_Players[i].reverseGravityTimer > 0)
-        {
-            g_Players[i].reverseGravityTimer--;
-
-            if(g_Players[i].reverseGravityTimer == 0)
-            {
-                // reverse gravity is jarring, so 0 out their speed first
-                g_Players[i].y_speed = 0;
-            }
-        }
+        applyPlayerPhysics(i, flapping);
     }
 
     return;
@@ -958,6 +1379,14 @@ void gameplay_checkForCollisions(void)
     bool result = false;
 
     if(g_Game.gameState != GAMESTATE_GAMEPLAY)
+    {
+        return;
+    }
+
+    /* In online mode, the server is authoritative for collisions, scoring,
+     * kills, and spawns. It sends PLAYER_KILL, SCORE_UPDATE, etc.
+     * We skip all local collision/scoring logic. */
+    if (g_Game.isOnlineMode)
     {
         return;
     }
@@ -1020,6 +1449,8 @@ void gameplay_checkForCollisions(void)
             {
                 // player is halfway throught the pipe, give them a point
                 g_Players[i].numPoints++;
+                // Progressive speed: +0.012 pixels/frame per gate
+                g_Game.pipeSpeed += 3;
                 adjustDifficulty();
             }
         }
@@ -1043,6 +1474,18 @@ void gameplay_checkForCollisions(void)
     }
 
     return;
+}
+
+/* Look up player name from game roster by player ID (online mode) */
+static const char* gameOverGetRosterName(int playerID)
+{
+    const fnet_state_data_t* nd = fnet_get_data();
+    int i;
+    for (i = 0; i < nd->game_roster_count && i < FNET_MAX_PLAYERS; i++) {
+        if (nd->game_roster[i].active && nd->game_roster[i].id == (uint8_t)playerID)
+            return nd->game_roster[i].name;
+    }
+    return "";
 }
 
 // Shared by both GAMESTATE_GAME_OVER and GAMESTATE_PAUSE
@@ -1179,6 +1622,39 @@ void gameOver_draw(void)
         jo_sprite_draw3D(g_Assets.smallDigitSprites[ones], sprite_x_pos + 100,sprite_y_pos + 1, 500);
         jo_sprite_draw3D(g_Assets.smallDigitSprites[tens], sprite_x_pos + 91,sprite_y_pos + 1, 500);
         jo_sprite_draw3D(g_Assets.smallDigitSprites[hunds], sprite_x_pos + 82,sprite_y_pos + 1, 500);
+    }
+
+    /* Online mode: display player names aligned with scoreboard rows */
+    if (g_Game.isOnlineMode)
+    {
+        /* VDP2 text rows that correspond to each player's VDP1 sprite Y:
+         * Player sprite_y = -60 + (slot * 20)
+         * VDP2 row = (sprite_y + 112) / 8
+         * slots 0-5: rows 6, 9, 11, 14, 16, 19
+         * We show the name 1 row ABOVE the sprite row */
+        static const int left_rows[6]  = {5, 8, 10, 13, 15, 18};
+        static const int right_rows[6] = {5, 8, 10, 13, 15, 18};
+        int j;
+
+        for (j = 0; j < MAX_PLAYERS; j++)
+        {
+            const char* pname = gameOverGetRosterName(sortedPlayers[j].playerID);
+            int col, text_row;
+
+            if (j < 6)
+            {
+                col = 1;
+                text_row = left_rows[j];
+            }
+            else
+            {
+                col = 21;
+                text_row = right_rows[j - 6];
+            }
+
+            if (pname[0] != '\0')
+                font_printf(FONT_X(col), FONT_Y(text_row), 500, "%-16s", pname);
+        }
     }
 
     // draw the floor
@@ -1326,7 +1802,14 @@ void gameOver_input(void)
             if(g_Game.input.pressedABC == false &&
                 g_Game.input.pressedStart == false)
             {
-                if(g_Game.gameState == GAMESTATE_GAME_OVER || g_Game.gameState == GAMESTATE_VICTORY)
+                if (g_Game.isOnlineMode)
+                {
+                    // Online: "Retry" returns to lobby for next game
+                    jo_clear_screen();
+                    g_Game.gameState = GAMESTATE_LOBBY;
+                    lobby_init();
+                }
+                else if(g_Game.gameState == GAMESTATE_GAME_OVER || g_Game.gameState == GAMESTATE_VICTORY)
                 {
                     transitionToGameplay(true);
                 }
@@ -1344,6 +1827,13 @@ void gameOver_input(void)
             {
                 g_Game.input.pressedABC = true;
                 g_Game.input.pressedStart = true;
+
+                if (g_Game.isOnlineMode)
+                {
+                    // Online: "Exit" disconnects and returns to title
+                    fnet_send_disconnect();
+                    g_Game.isOnlineMode = false;
+                }
                 transitionToTitleScreen();
             }
         }
@@ -1429,6 +1919,7 @@ void loadSpriteAssets()
     g_Assets.lives5Sprite = jo_sprite_add_tga(NULL, "LIVES5.TGA", JO_COLOR_Transparent);
     g_Assets.lives9Sprite = jo_sprite_add_tga(NULL, "LIVES9.TGA", JO_COLOR_Transparent);
     g_Assets.startSprite = jo_sprite_add_tga(NULL, "START.TGA", JO_COLOR_Transparent);
+    g_Assets.onlineSprite = jo_sprite_add_tga(NULL, "ONLINE.TGA", JO_COLOR_Transparent);
     g_Assets.positionSprite = jo_sprite_add_tga(NULL, "POS.TGA", JO_COLOR_Transparent);
     g_Assets.randomSprite = jo_sprite_add_tga(NULL, "RAND.TGA", JO_COLOR_Transparent);
     g_Assets.fixedSprite = jo_sprite_add_tga(NULL, "FIXED.TGA", JO_COLOR_Transparent);
@@ -1487,6 +1978,9 @@ void loadSpriteAssets()
         g_Assets.powerUpSprites[i] = g_Assets.powerUpSprites[0] + i;
     }
 
+    // custom sprite font for online screens
+    font_load();
+
     // back to root dir
     jo_fs_cd("..");
 
@@ -1535,9 +2029,10 @@ void transitionToTitleScreen(void)
     }
 
     jo_clear_screen();
+    jo_set_printf_color_index(JO_COLOR_INDEX_White);
     setBackground();
 
-    jo_audio_play_cd_track(TITLE_TRACK, TITLE_TRACK, false);
+    jo_audio_play_cd_track(TITLE_TRACK, TITLE_TRACK, true);
     g_Game.gameState = GAMESTATE_TITLE_SCREEN;
 
     return;
@@ -1552,6 +2047,10 @@ void transitionToGameplay(bool newGame)
     g_Game.frameDeathTimer = 0;
     g_Game.frameBlockInputTimer = 0;
 
+    // Initialize progressive speed (fixed-point 8.8: 256 = 1.0 pixel/frame)
+    g_Game.pipeSpeed = 256;
+    g_Game.pipeSpeedAccum = 0;
+
     jo_clear_screen();
     setBackground();
     g_Game.input.pressedStart = true;
@@ -1561,10 +2060,20 @@ void transitionToGameplay(bool newGame)
     if(newGame == true)
     {
         memset(&g_Pipes, 0, sizeof(g_Pipes));
-        initPipe(&g_Pipes[0]);
-
         memset(&g_PowerUps, 0, sizeof(g_PowerUps));
-        initPowerUp(&g_PowerUps[0]);
+
+        if (g_Game.isOnlineMode)
+        {
+            // Online mode: server controls pipe/powerup spawning.
+            // Don't init pipes/powerups locally. Server will send PIPE_SPAWN
+            // and POWERUP_SPAWN messages.
+            g_Game.netFrameCount = 0;
+        }
+        else
+        {
+            initPipe(&g_Pipes[0]);
+            initPowerUp(&g_PowerUps[0]);
+        }
 
         // randomize starting positions if specified
         if(g_Game.startingPositionChoice == 1)
@@ -1583,6 +2092,7 @@ void transitionToGameplay(bool newGame)
         g_Game.topScore = 0;
     }
 
+    jo_audio_stop_cd();
     jo_audio_play_cd_track(GAMEPLAY_TRACK, GAMEPLAY_TRACK, true);
 
     g_Game.gameState = GAMESTATE_GAMEPLAY;
@@ -1600,19 +2110,23 @@ void transitionToGameOverOrPause(bool pause)
 
     if(pause == true)
     {
+        // Online mode doesn't support local pause
+        if (g_Game.isOnlineMode)
+        {
+            return;
+        }
         g_Game.gameState = GAMESTATE_PAUSED;
     }
     else
     {
         if(g_Game.topScore >= VICTORY_CONDITION)
         {
-            //jo_core_error("In victory");
-            jo_audio_play_cd_track(LIFE_UP_TRACK, LIFE_UP_TRACK, false);
+            jo_audio_play_cd_track(GAMEOVER_TRACK, GAMEOVER_TRACK, true);
             g_Game.gameState = GAMESTATE_VICTORY;
         }
         else
         {
-            jo_audio_play_cd_track(GAMEOVER_TRACK, GAMEOVER_TRACK, false);
+            jo_audio_play_cd_track(GAMEOVER_TRACK, GAMEOVER_TRACK, true);
             g_Game.gameState = GAMESTATE_GAME_OVER;
         }
     }

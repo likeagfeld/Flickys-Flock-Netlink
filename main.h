@@ -1,3 +1,4 @@
+#pragma once
 /*
  * * Flicky's Flocky
  ** 12 player Flappy Bird clone for the Sega Saturn
@@ -36,21 +37,22 @@
 
 #include <jo/jo.h>
 #include "STRING.H"
+#include "state.h"
+#include "font.h"
 
-#define VERSION             "v1.0.1"
+#define VERSION             "v2.0.0"
+
+#ifndef FNET_MAX_NAME
+#define FNET_MAX_NAME 16
+#endif
 
 #define MAX_PLAYERS         12
 #define MAX_FLICKY_SPRITES  12
 #define MAX_PIPES           6
 #define MAX_POWER_UPS       3
 
-#define GAMESTATE_UNINITIALIZED 0
-#define GAMESTATE_SSMTF_LOGO    1
-#define GAMESTATE_TITLE_SCREEN  2
-#define GAMESTATE_GAMEPLAY      3
-#define GAMESTATE_PAUSED        4
-#define GAMESTATE_GAME_OVER     5
-#define GAMESTATE_VICTORY       6
+/* Game states now in state.h - kept here for backward compatibility */
+/* GAMESTATE_UNINITIALIZED through GAMESTATE_VICTORY defined in state.h */
 
 #define FLICKYSTATE_UNINITIALIZED 0
 #define FLICKYSTATE_FLYING        1
@@ -227,6 +229,21 @@ typedef struct _GAME
     // hack to cache controller inputs
     INPUTCACHE input;
 
+    // online multiplayer
+    bool isOnlineMode;
+    unsigned char myPlayerID;      // which player index this Saturn controls
+    unsigned int netFrameCount;    // frame counter for network input sync
+    char playerName[FNET_MAX_NAME + 1]; // player name for online
+
+    // progressive speed (fixed-point 8.8: 256 = 1.0 pixel/frame)
+    int pipeSpeed;
+    int pipeSpeedAccum;
+
+    // 2nd controller local co-op in online mode
+    bool hasSecondLocal;
+    unsigned char myPlayerID2;     // 0xFF = none
+    char playerName2[FNET_MAX_NAME + 1];
+
 } GAME, *PGAME;
 
 // holds sprite and audio assets
@@ -241,6 +258,7 @@ typedef struct _assets
     // title screen sprites
     int titleSprite;
     int startSprite;
+    int onlineSprite;
     int livesSprite;
     int livesInfSprite;
     int lives1Sprite;
@@ -286,6 +304,18 @@ typedef struct _assets
 } ASSETS, *PASSETS;
 
 //
+// global variables (defined in main.c)
+//
+extern GAME g_Game;
+extern ASSETS g_Assets;
+extern FLICKY g_Players[MAX_PLAYERS];
+extern FLICKY g_FlickyTitleSprites[MAX_FLICKY_SPRITES];
+extern FLICKY_SPRITES g_FlickySprites[MAX_FLICKY_SPRITES];
+extern PIPE g_Pipes[MAX_PIPES];
+extern POWERUP g_PowerUps[MAX_POWER_UPS];
+extern bool g_modem_detected;
+
+//
 // function prototypes
 //
 
@@ -300,6 +330,20 @@ void gameplay_input(void);
 void gameplay_checkForCollisions(void);
 void gameOver_draw(void);
 void gameOver_input(void);
+void network_tick(void);
+
+// online screen callbacks (defined in name_entry.c, connecting.c, lobby.c)
+void nameEntry_init(void);
+void nameEntry_input(void);
+void nameEntry_draw(void);
+void connecting_init(void);
+void connecting_input(void);
+void connecting_update(void);
+void connecting_draw(void);
+void lobby_init(void);
+void lobby_input(void);
+void lobby_update(void);
+void lobby_draw(void);
 
 // loading resources
 void loadSpriteAssets(void);
@@ -347,3 +391,16 @@ void adjustDifficulty(void);
 
 // misc
 void shuffleArray(unsigned int* array, unsigned int size);
+
+/**
+ * Detect second local controller for online co-op.
+ * Without multitap, Port B maps to jo_inputs[6].
+ * With multitap on Port A, second device maps to jo_inputs[1].
+ * Returns port index (1 or 6) or -1 if no second controller.
+ */
+static inline int getP2Port(void)
+{
+    if (jo_is_input_available(1)) return 1;   /* multitap slot */
+    if (jo_is_input_available(6)) return 6;   /* Port B direct */
+    return -1;
+}
