@@ -194,6 +194,7 @@ typedef struct _PIPE
     int top_y_pos;   // y position of the top half of the pipe
     int gap;         // how large the gap between top and bottom is
     int numSections; // number of times to repeat the sprites
+    unsigned int scoredBy; // bitmask: bit i set = player i already scored on this pipe
 } PIPE, *PPIPE;
 
 // the power-up

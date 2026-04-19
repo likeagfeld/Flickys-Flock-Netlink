@@ -412,6 +412,7 @@ static void process_pipe_spawn(const uint8_t* payload, int len)
     g_Pipes[slot].numSections = (int)sections;
     g_Pipes[slot].top_y_pos = (int)top_y;
     g_Pipes[slot].z_pos = 500;
+    g_Pipes[slot].scoredBy = 0;
 }
 
 static void process_powerup_spawn(const uint8_t* payload, int len)
@@ -481,8 +482,8 @@ static void process_score_update(const uint8_t* payload, int len)
         int old_points = g_Players[pid].numPoints;
         int new_points = (int)points;
         if (new_points > old_points) {
-            /* +3 per gate in fixed-point 8.8 (matching server PIPE_SPEED_PER_GATE) */
-            g_Game.pipeSpeed += 3 * (new_points - old_points);
+            /* +8 per gate in fixed-point 8.8 (matching server PIPE_SPEED_PER_GATE) */
+            g_Game.pipeSpeed += 8 * (new_points - old_points);
         }
     }
 

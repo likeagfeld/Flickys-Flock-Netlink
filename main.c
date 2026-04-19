@@ -1175,22 +1175,7 @@ void gameplay_input(void)
                 {
                     bool p2flap = false;
 
-                    // L/R trigger: change character
-                    if (p2_bits & FNET_INPUT_LTRIG) {
-                        if (g_Players[p2id].input.pressedLT == false)
-                            g_Players[p2id].spriteID = getNextFlickySprite(g_Players[p2id].spriteID, -1);
-                        g_Players[p2id].input.pressedLT = true;
-                    } else {
-                        g_Players[p2id].input.pressedLT = false;
-                    }
-
-                    if (p2_bits & FNET_INPUT_RTRIG) {
-                        if (g_Players[p2id].input.pressedRT == false)
-                            g_Players[p2id].spriteID = getNextFlickySprite(g_Players[p2id].spriteID, 1);
-                        g_Players[p2id].input.pressedRT = true;
-                    } else {
-                        g_Players[p2id].input.pressedRT = false;
-                    }
+                    // L/R trigger: NOT allowed during gameplay (lobby only)
 
                     // Flap input
                     if (p2_bits & FNET_INPUT_FLAP) {
@@ -1218,32 +1203,7 @@ online_skip_p2_physics:
         {
             bool flapping = false;
 
-            // L/R trigger: change character
-            if (input_bits & FNET_INPUT_LTRIG)
-            {
-                if (g_Players[myID].input.pressedLT == false)
-                {
-                    g_Players[myID].spriteID = getNextFlickySprite(g_Players[myID].spriteID, -1);
-                }
-                g_Players[myID].input.pressedLT = true;
-            }
-            else
-            {
-                g_Players[myID].input.pressedLT = false;
-            }
-
-            if (input_bits & FNET_INPUT_RTRIG)
-            {
-                if (g_Players[myID].input.pressedRT == false)
-                {
-                    g_Players[myID].spriteID = getNextFlickySprite(g_Players[myID].spriteID, 1);
-                }
-                g_Players[myID].input.pressedRT = true;
-            }
-            else
-            {
-                g_Players[myID].input.pressedRT = false;
-            }
+            // L/R trigger: NOT allowed during gameplay (lobby only)
 
             // Flap input
             if (input_bits & FNET_INPUT_FLAP)
@@ -1445,12 +1405,14 @@ void gameplay_checkForCollisions(void)
             }
 
             // no collision, did the player score?
-            if(g_Players[i].x_pos == g_Pipes[j].x_pos)
+            // Use <= with bitmask to handle speeds > 1px/frame
+            if(g_Players[i].x_pos >= g_Pipes[j].x_pos &&
+               !(g_Pipes[j].scoredBy & (1u << i)))
             {
-                // player is halfway throught the pipe, give them a point
+                g_Pipes[j].scoredBy |= (1u << i);
                 g_Players[i].numPoints++;
-                // Progressive speed: +0.012 pixels/frame per gate
-                g_Game.pipeSpeed += 3;
+                // Progressive speed: increase per gate (fixed-point 8.8)
+                g_Game.pipeSpeed += 8;
                 adjustDifficulty();
             }
         }
@@ -2406,6 +2368,7 @@ void initPipe(PPIPE pipe)
         }
     }
 
+    pipe->scoredBy = 0;
     pipe->state = PIPESTATE_INITIALIZED;
 }
 

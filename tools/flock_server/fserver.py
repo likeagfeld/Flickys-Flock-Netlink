@@ -135,7 +135,7 @@ VICTORY_CONDITION = 100
 
 # Pipe constants (matching Saturn main.c initPipe() exactly)
 PIPE_SPEED_BASE = 256  # fixed-point 8.8: 256 = 1.0 pixel/frame
-PIPE_SPEED_PER_GATE = 3  # +0.012 per gate passed (very slight increase)
+PIPE_SPEED_PER_GATE = 8  # +0.031 per gate passed (~3.1% per gate)
 PIPE_SPAWN_X = 256     # spawn off right edge (matching Saturn getNextPipePosition)
 PIPE_NUM_SECTIONS = 10 # always 10 sections (matching Saturn initPipe)
 
@@ -172,6 +172,15 @@ BOT_NAMES = [
 # ==========================================================================
 # SNCP Framing
 # ==========================================================================
+
+def _clamp16(v: int) -> int:
+    """Clamp an integer to signed 16-bit range for struct.pack('!h')."""
+    if v > 32767:
+        return 32767
+    if v < -32768:
+        return -32768
+    return v
+
 
 def encode_frame(payload: bytes) -> bytes:
     """Wrap payload in SNCP length-prefixed frame."""
@@ -279,7 +288,7 @@ def build_player_sync(player_id: int, y: int, y_speed: int,
                       sprite: int) -> bytes:
     """[player_id:1][y:2s][y_speed:2s][state:1][points:2][deaths:2][sprite:1]"""
     payload = bytes([FNET_MSG_PLAYER_SYNC, player_id & 0xFF])
-    payload += struct.pack("!hh", y & 0xFFFF, y_speed & 0xFFFF)
+    payload += struct.pack("!hh", _clamp16(y), _clamp16(y_speed))
     payload += bytes([state & 0xFF])
     payload += struct.pack("!HH", points & 0xFFFF, deaths & 0xFFFF)
     payload += bytes([sprite & 0xFF])
@@ -290,10 +299,10 @@ def build_pipe_spawn(slot: int, x: int, y: int, gap: int,
                      sections: int, top_y: int) -> bytes:
     """[slot:1][x:2][y:2s][gap:1][sections:1][top_y:2s]"""
     payload = bytes([FNET_MSG_PIPE_SPAWN, slot & 0xFF])
-    payload += struct.pack("!h", x & 0xFFFF)
-    payload += struct.pack("!h", y & 0xFFFF)
+    payload += struct.pack("!h", _clamp16(x))
+    payload += struct.pack("!h", _clamp16(y))
     payload += bytes([gap & 0xFF, sections & 0xFF])
-    payload += struct.pack("!h", top_y & 0xFFFF)
+    payload += struct.pack("!h", _clamp16(top_y))
     return encode_frame(payload)
 
 
@@ -301,8 +310,8 @@ def build_powerup_spawn(slot: int, pu_type: int, x: int, y: int) -> bytes:
     """[slot:1][type:1][x:2][y:2s]"""
     payload = bytes([FNET_MSG_POWERUP_SPAWN, slot & 0xFF])
     payload += bytes([pu_type & 0xFF])
-    payload += struct.pack("!h", x & 0xFFFF)
-    payload += struct.pack("!h", y & 0xFFFF)
+    payload += struct.pack("!h", _clamp16(x))
+    payload += struct.pack("!h", _clamp16(y))
     return encode_frame(payload)
 
 
@@ -1668,9 +1677,10 @@ class FlockServer:
 
         # Additional local players (P2 co-op)
         for c in ready_players:
-            for ln in c.local_player_names:
+            for i, ln in enumerate(c.local_player_names):
                 c.local_player_ids.append(pid)
                 self.sim.init_player(pid)
+                self.sim.players[pid].sprite_id = (c.sprite_id + 1 + i) % 12
                 pid += 1
 
         # Bots
@@ -1699,7 +1709,7 @@ class FlockServer:
         for c in ready_players:
             roster.append((c.game_player_id, c.username, c.sprite_id))
             for i, ln in enumerate(c.local_player_names):
-                lp_sprite = (c.local_player_ids[i]) % 12
+                lp_sprite = (c.sprite_id + 1 + i) % 12
                 roster.append((c.local_player_ids[i], ln, lp_sprite))
         for bot in ready_bots:
             roster.append((bot.game_player_id, bot.name, bot.sprite_id))
@@ -1816,11 +1826,16 @@ class FlockServer:
                 bot.last_sent_bits = bits
                 bot.force_send_counter = 0
 
-            # Send bot player sync periodically
-            sync_msg = build_player_sync(
-                bot.game_player_id, p.y_pos, p.y_speed,
-                p.state, p.num_points, p.num_deaths, p.sprite_id)
-            self._broadcast_to_game(sync_msg)
+            # Send bot player sync every 4 ticks (matching client cooldown)
+            if not hasattr(bot, 'sync_counter'):
+                bot.sync_counter = 0
+            bot.sync_counter += 1
+            if bot.sync_counter >= 4:
+                bot.sync_counter = 0
+                sync_msg = build_player_sync(
+                    bot.game_player_id, p.y_pos, p.y_speed,
+                    p.state, p.num_points, p.num_deaths, p.sprite_id)
+                self._broadcast_to_game(sync_msg)
 
     def _broadcast_event(self, evt):
         """Convert a simulation event to a message and broadcast."""
