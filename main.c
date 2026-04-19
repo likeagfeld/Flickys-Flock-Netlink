@@ -490,7 +490,7 @@ void titleScreen_draw(void)
             break;
 
         case 3:
-            titleFlickyOffset = 114;
+            titleFlickyOffset = 98;
             break;
 
         default:
@@ -1411,8 +1411,8 @@ void gameplay_checkForCollisions(void)
             {
                 g_Pipes[j].scoredBy |= (1u << i);
                 g_Players[i].numPoints++;
-                // Progressive speed: increase per gate (fixed-point 8.8)
-                g_Game.pipeSpeed += 8;
+                // Progressive speed: +12% of base per gate (fixed-point 8.8)
+                g_Game.pipeSpeed += 31;
                 adjustDifficulty();
             }
         }
@@ -2052,6 +2052,32 @@ void transitionToGameplay(bool newGame)
 
         initPlayers();
         g_Game.topScore = 0;
+
+        if (g_Game.isOnlineMode)
+        {
+            /* Online: only spawn players the server told us about.
+             * IDs are sequential 0..(opponent_count). Set the rest to DEAD. */
+            const fnet_state_data_t* nd = fnet_get_data();
+            int totalActive = (int)nd->opponent_count + 1;
+            if (totalActive > MAX_PLAYERS) totalActive = MAX_PLAYERS;
+            for (int i = totalActive; i < MAX_PLAYERS; i++)
+            {
+                g_Players[i].state = FLICKYSTATE_DEAD;
+            }
+        }
+        else
+        {
+            /* Offline: only spawn players that have controllers plugged in.
+             * Player 0 always active. Check ports 1-11 for additional. */
+            int numActive = 1;
+            for (int i = 1; i < MAX_PLAYERS; i++)
+            {
+                if (jo_is_input_available(i))
+                    numActive++;
+                else
+                    g_Players[i].state = FLICKYSTATE_DEAD;
+            }
+        }
     }
 
     jo_audio_stop_cd();

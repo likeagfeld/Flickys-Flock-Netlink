@@ -482,8 +482,8 @@ static void process_score_update(const uint8_t* payload, int len)
         int old_points = g_Players[pid].numPoints;
         int new_points = (int)points;
         if (new_points > old_points) {
-            /* +8 per gate in fixed-point 8.8 (matching server PIPE_SPEED_PER_GATE) */
-            g_Game.pipeSpeed += 8 * (new_points - old_points);
+            /* +31 per gate in fixed-point 8.8 (~12% of base per gate) */
+            g_Game.pipeSpeed += 31 * (new_points - old_points);
         }
     }
 

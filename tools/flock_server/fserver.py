@@ -135,7 +135,7 @@ VICTORY_CONDITION = 100
 
 # Pipe constants (matching Saturn main.c initPipe() exactly)
 PIPE_SPEED_BASE = 256  # fixed-point 8.8: 256 = 1.0 pixel/frame
-PIPE_SPEED_PER_GATE = 8  # +0.031 per gate passed (~3.1% per gate)
+PIPE_SPEED_PER_GATE = 31  # +0.121 per gate passed (~12% per gate)
 PIPE_SPAWN_X = 256     # spawn off right edge (matching Saturn getNextPipePosition)
 PIPE_NUM_SECTIONS = 10 # always 10 sections (matching Saturn initPipe)
 
