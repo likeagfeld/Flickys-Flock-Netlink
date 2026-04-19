@@ -1343,11 +1343,45 @@ void gameplay_checkForCollisions(void)
         return;
     }
 
-    /* In online mode, the server is authoritative for collisions, scoring,
-     * kills, and spawns. It sends PLAYER_KILL, SCORE_UPDATE, etc.
-     * We skip all local collision/scoring logic. */
+    /* Online mode: client-authoritative collision for LOCAL player(s).
+     * The client knows exact pipe positions (it rendered them).
+     * Server is authoritative for scoring, remote players, and game over.
+     * If server also sends PLAYER_KILL, it's harmless (already dead). */
     if (g_Game.isOnlineMode)
     {
+        int localIDs[2];
+        int numLocal = 0;
+        localIDs[numLocal++] = (int)g_Game.myPlayerID;
+        if (g_Game.hasSecondLocal && g_Game.myPlayerID2 != 0xFF)
+            localIDs[numLocal++] = (int)g_Game.myPlayerID2;
+
+        for (int li = 0; li < numLocal; li++)
+        {
+            int i = localIDs[li];
+            if (i < 0 || i >= MAX_PLAYERS) continue;
+            if (g_Players[i].state != FLICKYSTATE_FLYING) continue;
+            if (g_Players[i].hasFlapped == false) continue;
+            if (g_Players[i].spawnFrameTimer < SPAWN_FRAME_TIMER) continue;
+
+            // ground collision
+            if (g_Players[i].y_pos > GROUND_COLLISION)
+            {
+                killPlayer(i);
+                continue;
+            }
+
+            // pipe collision
+            for (int j = 0; j < MAX_PIPES; j++)
+            {
+                if (g_Pipes[j].state != PIPESTATE_INITIALIZED) continue;
+
+                result = checkForFlickyPipeCollisions(&g_Players[i], &g_Pipes[j], false);
+                if (result) { killPlayer(i); break; }
+
+                result = checkForFlickyPipeCollisions(&g_Players[i], &g_Pipes[j], true);
+                if (result) { killPlayer(i); break; }
+            }
+        }
         return;
     }
 
