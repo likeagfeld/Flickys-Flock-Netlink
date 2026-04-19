@@ -447,6 +447,12 @@ static void process_player_kill(const uint8_t* payload, int len)
     pid = payload[1];
     if (pid >= MAX_PLAYERS) return;
 
+    /* Client-authoritative: ignore server kills for local player(s).
+     * Local player deaths are detected by client-side collision and
+     * reported to server via CLIENT_DEATH. Server relays to others. */
+    if (pid == g_net.my_player_id) return;
+    if (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2) return;
+
     killPlayer((int)pid);
 }
 
@@ -482,8 +488,8 @@ static void process_score_update(const uint8_t* payload, int len)
         int old_points = g_Players[pid].numPoints;
         int new_points = (int)points;
         if (new_points > old_points) {
-            /* +31 per gate in fixed-point 8.8 (~12% of base per gate) */
-            g_Game.pipeSpeed += 31 * (new_points - old_points);
+            /* +64 per gate in fixed-point 8.8 (~25% of base per gate) */
+            g_Game.pipeSpeed += 64 * (new_points - old_points);
         }
     }
 
@@ -1011,6 +1017,27 @@ void fnet_send_player_state_p2(void)
         (int16_t)g_Players[g_Game.myPlayerID2].y_speed,
         (uint8_t)g_Players[g_Game.myPlayerID2].state,
         (uint8_t)g_Players[g_Game.myPlayerID2].spriteID);
+    net_transport_send(g_net.transport, g_net.tx_buf, len);
+}
+
+/*============================================================================
+ * Death Reporting (client-authoritative collision)
+ *============================================================================*/
+
+void fnet_send_player_death(void)
+{
+    int len;
+    if (g_net.state != FNET_STATE_PLAYING || !g_net.transport) return;
+    len = fnet_encode_client_death(g_net.tx_buf);
+    net_transport_send(g_net.transport, g_net.tx_buf, len);
+}
+
+void fnet_send_player_death_p2(void)
+{
+    int len;
+    if (g_net.state != FNET_STATE_PLAYING || !g_net.transport) return;
+    if (g_Game.myPlayerID2 == 0xFF) return;
+    len = fnet_encode_client_death_p2(g_net.tx_buf, g_Game.myPlayerID2);
     net_transport_send(g_net.transport, g_net.tx_buf, len);
 }
 

@@ -266,4 +266,10 @@ void fnet_send_input_delta_p2(uint16_t frame_num, uint8_t input_bits);
 /** Send P2 co-op player state to server (throttled). */
 void fnet_send_player_state_p2(void);
 
+/** Report local player death to server (client-authoritative collision). */
+void fnet_send_player_death(void);
+
+/** Report P2 co-op player death to server. */
+void fnet_send_player_death_p2(void);
+
 #endif /* FLOCK_NET_H */

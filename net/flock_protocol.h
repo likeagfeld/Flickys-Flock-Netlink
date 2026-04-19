@@ -52,6 +52,8 @@
 #define FNET_MSG_REMOVE_LOCAL_PLAYER 0x19 /* (no payload) - remove P2 co-op */
 #define FNET_MSG_INPUT_STATE_P2    0x1A  /* [player_id:1][frame:2 BE][input:1] - P2 input */
 #define FNET_MSG_LEADERBOARD_REQ   0x1B  /* Client requests leaderboard (no payload) */
+#define FNET_MSG_CLIENT_DEATH      0x1C  /* Client reports own death (no payload) */
+#define FNET_MSG_CLIENT_DEATH_P2   0x1D  /* Client reports P2 death [player_id:1] */
 
 /*============================================================================
  * Flicky's Flock Server -> Client Messages (0xA0 - 0xBF)
@@ -387,6 +389,25 @@ static inline int fnet_encode_input_state_p2(uint8_t* buf,
     buf[5] = (uint8_t)(frame_num & 0xFF);
     buf[6] = input_bits;
     return 7;
+}
+
+/** Encode CLIENT_DEATH: report local player's own death to server. */
+static inline int fnet_encode_client_death(uint8_t* buf)
+{
+    buf[0] = 0x00;
+    buf[1] = 0x01;
+    buf[2] = FNET_MSG_CLIENT_DEATH;
+    return 3;
+}
+
+/** Encode CLIENT_DEATH_P2: report P2 co-op player's death to server. */
+static inline int fnet_encode_client_death_p2(uint8_t* buf, uint8_t player_id)
+{
+    buf[0] = 0x00;
+    buf[1] = 0x02;  /* payload = type(1) + player_id(1) */
+    buf[2] = FNET_MSG_CLIENT_DEATH_P2;
+    buf[3] = player_id;
+    return 4;
 }
 
 #endif /* FLOCK_PROTOCOL_H */

@@ -90,6 +90,8 @@ FNET_MSG_ADD_LOCAL_PLAYER = 0x18
 FNET_MSG_REMOVE_LOCAL_PLAYER = 0x19
 FNET_MSG_INPUT_STATE_P2 = 0x1A
 FNET_MSG_LEADERBOARD_REQ = 0x1B
+FNET_MSG_CLIENT_DEATH = 0x1C
+FNET_MSG_CLIENT_DEATH_P2 = 0x1D
 
 # Flicky's Flock Messages -- Server -> Client
 FNET_MSG_LOBBY_STATE = 0xA0
@@ -135,7 +137,7 @@ VICTORY_CONDITION = 100
 
 # Pipe constants (matching Saturn main.c initPipe() exactly)
 PIPE_SPEED_BASE = 256  # fixed-point 8.8: 256 = 1.0 pixel/frame
-PIPE_SPEED_PER_GATE = 31  # +0.121 per gate passed (~12% per gate)
+PIPE_SPEED_PER_GATE = 64  # +0.25 per gate passed (~25% per gate)
 PIPE_SPAWN_X = 256     # spawn off right edge (matching Saturn getNextPipePosition)
 PIPE_NUM_SECTIONS = 10 # always 10 sections (matching Saturn initPipe)
 
@@ -437,6 +439,10 @@ class GameSimulation:
         self.pipe_speed = PIPE_SPEED_BASE
         self.pipe_speed_accum = 0
 
+        # Track which player IDs are bots (collision is server-authoritative
+        # only for bots; human players report their own deaths)
+        self.bot_ids: set = set()
+
         # Starting positions (matching Saturn getStartingPosition exactly)
         self._starting_positions = list(range(num_players))
         if start_pos == 1:
@@ -662,10 +668,11 @@ class GameSimulation:
                 if p.stone_sneakers_timer > 0:
                     p.stone_sneakers_timer -= 1
 
-                # Ground collision (matching Saturn: y_pos > GROUND_COLLISION)
-                if p.y_pos > GROUND_COLLISION and p.has_flapped:
-                    if p.spawn_timer <= 0:
-                        events.append(("player_kill", pid))
+                # Ground collision -- only for bots (humans report own death)
+                if pid in self.bot_ids:
+                    if p.y_pos > GROUND_COLLISION and p.has_flapped:
+                        if p.spawn_timer <= 0:
+                            events.append(("player_kill", pid))
 
             # Move pipes left (using progressive speed)
             for i, pipe in enumerate(self.pipes):
@@ -711,9 +718,10 @@ class GameSimulation:
                         # Progressive speed: increase per gate
                         self.pipe_speed += PIPE_SPEED_PER_GATE
 
-                    # Collision with pipe
-                    if self._check_pipe_collision(p, pipe):
-                        events.append(("player_kill", pid))
+                    # Collision with pipe -- only for bots
+                    if pid in self.bot_ids:
+                        if self._check_pipe_collision(p, pipe):
+                            events.append(("player_kill", pid))
 
             # Check powerup collisions
             for pid, p in self.players.items():
@@ -1357,6 +1365,10 @@ class FlockServer:
             self._handle_input_state_p2(sock, client, payload)
         elif msg_type == FNET_MSG_LEADERBOARD_REQ:
             self._send_leaderboard_to_client(client)
+        elif msg_type == FNET_MSG_CLIENT_DEATH:
+            self._handle_client_death(sock, client, None)
+        elif msg_type == FNET_MSG_CLIENT_DEATH_P2:
+            self._handle_client_death(sock, client, payload)
         else:
             log.debug("Unknown message type 0x%02X from %s",
                       msg_type, client.address)
@@ -1689,6 +1701,7 @@ class FlockServer:
             bot.reset_for_game()
             self.sim.init_player(pid)
             self.sim.players[pid].sprite_id = bot.sprite_id
+            self.sim.bot_ids.add(pid)
             pid += 1
 
         # Update simulation total
@@ -1789,6 +1802,46 @@ class FlockServer:
                 c.send_raw(sync_msg)
 
     # ------------------------------------------------------------------
+    # Client-authoritative death
+    # ------------------------------------------------------------------
+
+    def _handle_client_death(self, sock, client: ClientInfo,
+                              payload: bytes):
+        """Client reports their own death (client-authoritative collision).
+        Kill the player on the server side and broadcast to all OTHER clients."""
+        if not self.game_active or not client.in_game:
+            return
+
+        # Determine which player died
+        if payload is not None and len(payload) >= 2:
+            # CLIENT_DEATH_P2: [type:1][player_id:1]
+            player_id = payload[1]
+            # Verify this P2 belongs to this client
+            if player_id not in client.local_player_ids:
+                return
+        else:
+            # CLIENT_DEATH: the client's own player
+            player_id = client.game_player_id
+
+        if self.sim:
+            self.sim._kill_player(player_id)
+
+        # Broadcast PLAYER_KILL to all OTHER clients (sender already killed locally)
+        kill_msg = build_player_kill(player_id)
+        for s, c in self.clients.items():
+            if c.in_game and s != sock:
+                c.send_raw(kill_msg)
+
+        # Send updated score to ALL
+        p = self.sim.players.get(player_id) if self.sim else None
+        if p:
+            score_msg = build_score_update(
+                player_id, p.num_points, p.num_deaths)
+            self._broadcast_to_game(score_msg)
+
+        log.info("Player %d death reported by client", player_id)
+
+    # ------------------------------------------------------------------
     # Game simulation tick
     # ------------------------------------------------------------------
 
@@ -1811,26 +1864,17 @@ class FlockServer:
 
             bits = bot.ai.tick(p.y_pos, p.y_speed, self.sim.pipes)
 
-            # Apply input to bot player
+            # Apply input to bot player (server-side only, no relay needed)
             if (bits & INPUT_FLAP) and not p.has_flapped:
                 p.has_flapped = True
             p.last_input = bits
 
-            # Delta compression for bot relay
-            bot.force_send_counter += 1
-            if bits != bot.last_sent_bits or bot.force_send_counter >= 15:
-                relay_msg = build_input_relay(
-                    bot.game_player_id, self.sim.game_frame & 0xFFFF,
-                    bits)
-                self._broadcast_to_game(relay_msg)
-                bot.last_sent_bits = bits
-                bot.force_send_counter = 0
-
-            # Send bot player sync every 4 ticks (matching client cooldown)
+            # Send bot PLAYER_SYNC periodically (clients use this for position)
+            # No INPUT_RELAY for bots - client doesn't use it, saves bandwidth
             if not hasattr(bot, 'sync_counter'):
                 bot.sync_counter = 0
             bot.sync_counter += 1
-            if bot.sync_counter >= 4:
+            if bot.sync_counter >= 8:
                 bot.sync_counter = 0
                 sync_msg = build_player_sync(
                     bot.game_player_id, p.y_pos, p.y_speed,

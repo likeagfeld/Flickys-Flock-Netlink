@@ -106,9 +106,11 @@ void network_tick(void)
 {
     fnet_tick();
 
-    /* LED blink: only during online gameplay with modem present */
-    if (g_Game.gameState == GAMESTATE_GAMEPLAY &&
-        g_Game.isOnlineMode && g_modem_detected)
+    /* LED blink: during any online-connected state with modem present */
+    if (g_modem_detected && (
+        (g_Game.gameState == GAMESTATE_GAMEPLAY && g_Game.isOnlineMode) ||
+        g_Game.gameState == GAMESTATE_CONNECTING ||
+        g_Game.gameState == GAMESTATE_LOBBY))
     {
         g_led_counter++;
         if (g_led_counter >= 40)
@@ -397,8 +399,8 @@ void titleScreen_draw(void)
 
     g_Game.frame++;
 
-    // version #
-    jo_printf(33, 28, "%s", VERSION);
+    // version # (custom font instead of jo_printf)
+    font_draw(VERSION, FONT_X(33), FONT_Y(28), 500);
 
     // Flicky's Flock title screen
     jo_sprite_draw3D(g_Assets.titleSprite, 0, 0, 500);
@@ -1345,15 +1347,23 @@ void gameplay_checkForCollisions(void)
 
     /* Online mode: client-authoritative collision for LOCAL player(s).
      * The client knows exact pipe positions (it rendered them).
-     * Server is authoritative for scoring, remote players, and game over.
-     * If server also sends PLAYER_KILL, it's harmless (already dead). */
+     * Client detects own death, reports to server via CLIENT_DEATH.
+     * Server relays PLAYER_KILL to all OTHER clients for sync.
+     * Server PLAYER_KILL for our own player is ignored in flock_net.c. */
     if (g_Game.isOnlineMode)
     {
         int localIDs[2];
         int numLocal = 0;
-        localIDs[numLocal++] = (int)g_Game.myPlayerID;
+        bool isP2[2] = {false, false};
+        localIDs[numLocal] = (int)g_Game.myPlayerID;
+        isP2[numLocal] = false;
+        numLocal++;
         if (g_Game.hasSecondLocal && g_Game.myPlayerID2 != 0xFF)
-            localIDs[numLocal++] = (int)g_Game.myPlayerID2;
+        {
+            localIDs[numLocal] = (int)g_Game.myPlayerID2;
+            isP2[numLocal] = true;
+            numLocal++;
+        }
 
         for (int li = 0; li < numLocal; li++)
         {
@@ -1367,6 +1377,8 @@ void gameplay_checkForCollisions(void)
             if (g_Players[i].y_pos > GROUND_COLLISION)
             {
                 killPlayer(i);
+                if (isP2[li]) fnet_send_player_death_p2();
+                else fnet_send_player_death();
                 continue;
             }
 
@@ -1376,10 +1388,22 @@ void gameplay_checkForCollisions(void)
                 if (g_Pipes[j].state != PIPESTATE_INITIALIZED) continue;
 
                 result = checkForFlickyPipeCollisions(&g_Players[i], &g_Pipes[j], false);
-                if (result) { killPlayer(i); break; }
+                if (result)
+                {
+                    killPlayer(i);
+                    if (isP2[li]) fnet_send_player_death_p2();
+                    else fnet_send_player_death();
+                    break;
+                }
 
                 result = checkForFlickyPipeCollisions(&g_Players[i], &g_Pipes[j], true);
-                if (result) { killPlayer(i); break; }
+                if (result)
+                {
+                    killPlayer(i);
+                    if (isP2[li]) fnet_send_player_death_p2();
+                    else fnet_send_player_death();
+                    break;
+                }
             }
         }
         return;
@@ -1445,8 +1469,8 @@ void gameplay_checkForCollisions(void)
             {
                 g_Pipes[j].scoredBy |= (1u << i);
                 g_Players[i].numPoints++;
-                // Progressive speed: +12% of base per gate (fixed-point 8.8)
-                g_Game.pipeSpeed += 31;
+                // Progressive speed: +25% of base per gate (fixed-point 8.8)
+                g_Game.pipeSpeed += 64;
                 adjustDifficulty();
             }
         }

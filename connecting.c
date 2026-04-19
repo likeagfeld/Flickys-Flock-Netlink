@@ -244,8 +244,5 @@ void connecting_draw(void)
     /* Cancel hint */
     font_draw_centered("PRESS B TO CANCEL", FONT_Y(26), 500);
 
-    /* VDP2 fallback: also show status via jo_printf in case font isn't loaded */
-    jo_printf(14, 8, "CONNECTING");
-    jo_printf(12, 14, "%s", g_connect_msg);
-    jo_printf(10, 26, "PRESS B TO CANCEL");
+    /* Note: removed VDP2 jo_printf fallback -- custom font is always loaded */
 }
