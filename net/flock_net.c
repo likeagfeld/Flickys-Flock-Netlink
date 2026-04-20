@@ -275,6 +275,12 @@ static void process_game_start(const uint8_t* payload, int len)
 
     g_net.has_last_results = false;
 
+    /* Clear pipe and powerup state NOW, before PIPE_SPAWN messages
+     * in the same buffer populate fresh data. This prevents the
+     * transitionToGameplay() memset from wiping pre-spawned pipes. */
+    memset(g_Pipes, 0, sizeof(PIPE) * MAX_PIPES);
+    memset(g_PowerUps, 0, sizeof(POWERUP) * MAX_POWER_UPS);
+
     g_net.state = FNET_STATE_PLAYING;
     g_net.status_msg = "Playing";
     g_net.local_frame = 0;
@@ -878,6 +884,11 @@ void fnet_send_ready(void)
     g_net.my_ready = !g_net.my_ready;
     len = fnet_encode_ready(g_net.tx_buf);
     net_transport_send(g_net.transport, g_net.tx_buf, len);
+}
+
+bool fnet_is_ready(void)
+{
+    return g_net.my_ready;
 }
 
 void fnet_send_start_game(void)

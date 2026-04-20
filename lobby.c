@@ -71,9 +71,12 @@ void lobby_input(void)
         g_Game.input.pressedABC = false;
     }
 
-    /* START = request game start */
+    /* START = request game start (auto-ready if not already) */
     if (jo_is_pad1_key_pressed(JO_KEY_START)) {
         if (g_Game.input.pressedStart == false) {
+            if (!fnet_is_ready()) {
+                fnet_send_ready();
+            }
             fnet_send_start_game();
         }
         g_Game.input.pressedStart = true;

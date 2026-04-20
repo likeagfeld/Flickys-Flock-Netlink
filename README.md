@@ -155,7 +155,7 @@ On Linux I was able to burn the ISO/CUE + WAV with: cdrdao write --force "START 
 - Not as crazy as [Twelve Snakes](https://github.com/slinga-homebrew/Twelve-Snakes)
 
 ## Building
-Requires Jo Engine to build. Checkout source code folder to your Jo Engine "Projects" directory and run `compile.bat` (Windows) or `./compile.sh` (Linux). The build generates `game.iso` and a `game.cue` sheet that references the audio tracks.
+Requires Jo Engine to build. Run `build.bat` (Windows) to compile, create the ISO, generate the CUE sheet, and package everything into the `build/` folder. The build generates `game.iso` and `START GAME.CUE` which references the audio tracks.
 
 ## Credits
 Thank you to [Ponut](https://github.com/ponut64) for performance and PCM help

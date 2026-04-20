@@ -218,6 +218,9 @@ void fnet_send_input_delta(uint16_t frame_num, uint8_t input_bits);
 /** Toggle ready state in lobby. */
 void fnet_send_ready(void);
 
+/** Check if local player is ready. */
+bool fnet_is_ready(void);
+
 /** Request game start (from lobby). */
 void fnet_send_start_game(void);
 

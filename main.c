@@ -2250,18 +2250,16 @@ void transitionToGameplay(bool newGame)
     // we reset the players
     if(newGame == true)
     {
-        memset(&g_Pipes, 0, sizeof(g_Pipes));
-        memset(&g_PowerUps, 0, sizeof(g_PowerUps));
-
         if (g_Game.isOnlineMode)
         {
-            // Online mode: server controls pipe/powerup spawning.
-            // Don't init pipes/powerups locally. Server will send PIPE_SPAWN
-            // and POWERUP_SPAWN messages.
+            // Online mode: pipes/powerups already cleared by process_game_start()
+            // and re-populated by PIPE_SPAWN messages. Don't wipe them here!
             g_Game.netFrameCount = 0;
         }
         else
         {
+            memset(&g_Pipes, 0, sizeof(g_Pipes));
+            memset(&g_PowerUps, 0, sizeof(g_PowerUps));
             initPipe(&g_Pipes[0]);
             initPowerUp(&g_PowerUps[0]);
         }

@@ -37,6 +37,11 @@ ECHO === ISO created successfully ===
 
 REM Step 4: Generate CUE file with audio tracks
 JoEngineCueMaker.exe
+REM Rename to START GAME.CUE
+IF EXIST game.cue (
+    IF EXIST "START GAME.CUE" DEL /Q "START GAME.CUE"
+    RENAME game.cue "START GAME.CUE"
+)
 ECHO === CUE file generated ===
 
 REM Step 5: Package everything into build\ folder
@@ -45,14 +50,11 @@ ECHO === Packaging build output ===
 IF NOT EXIST build mkdir build
 
 copy /Y game.iso build\game.iso >NUL
-copy /Y game.cue build\game.cue >NUL
+copy /Y "START GAME.CUE" "build\START GAME.CUE" >NUL
 copy /Y TRACK1.WAV build\TRACK1.WAV >NUL 2>NUL
 copy /Y TRACK2.WAV build\TRACK2.WAV >NUL 2>NUL
 copy /Y TRACK3.WAV build\TRACK3.WAV >NUL 2>NUL
 copy /Y TRACK4.WAV build\TRACK4.WAV >NUL 2>NUL
-
-REM Also copy the CUE with a friendly name
-copy /Y game.cue "build\START GAME.CUE" >NUL
 
 REM Copy server file to build for reference
 copy /Y ..\tools\flock_server\fserver.py build\fserver.py >NUL 2>NUL
