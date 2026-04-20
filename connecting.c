@@ -118,6 +118,7 @@ void connecting_update(void)
         break;
 
     case CONNECT_STAGE_PROBING:
+        connecting_draw();   /* draw text BEFORE slSynch so it's visible during block */
         slSynch();
 
         if (modem_probe(&g_uart) != MODEM_OK) {
@@ -137,6 +138,7 @@ void connecting_update(void)
         break;
 
     case CONNECT_STAGE_MODEM_INIT:
+        connecting_draw();   /* draw text BEFORE slSynch so it's visible during block */
         slSynch();
 
         if (modem_init(&g_uart) != MODEM_OK) {
@@ -156,6 +158,7 @@ void connecting_update(void)
         break;
 
     case CONNECT_STAGE_DIALING:
+        connecting_draw();   /* draw text BEFORE slSynch so it's visible during block */
         slSynch();
 
         result = modem_dial(&g_uart, CONNECT_DIAL_NUMBER, CONNECT_DIAL_TIMEOUT);

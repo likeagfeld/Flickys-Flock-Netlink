@@ -33,11 +33,16 @@ import logging
 import os
 import random
 import select
+import base64
+import queue
 import socket
 import struct
 import sys
+import threading
 import time
 import uuid
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +97,7 @@ FNET_MSG_INPUT_STATE_P2 = 0x1A
 FNET_MSG_LEADERBOARD_REQ = 0x1B
 FNET_MSG_CLIENT_DEATH = 0x1C
 FNET_MSG_CLIENT_DEATH_P2 = 0x1D
+FNET_MSG_CLIENT_POWERUP_COLLECT = 0x1E
 
 # Flicky's Flock Messages -- Server -> Client
 FNET_MSG_LOBBY_STATE = 0xA0
@@ -395,6 +401,7 @@ class ServerPipe:
         self.gap = 0
         self.num_sections = 0
         self.scored_by = set()  # player IDs that already scored on this pipe
+        self.speed_bumped = False  # True after first scorer bumped pipe speed
 
 
 class ServerPowerUp:
@@ -427,7 +434,6 @@ class GameSimulation:
 
         # Pipes
         self.pipes = [ServerPipe() for _ in range(MAX_PIPES)]
-        self.pipe_spawn_timer = 60  # initial delay before first pipe
         self.next_pipe_slot = 0
 
         # Powerups
@@ -511,7 +517,24 @@ class GameSimulation:
         reduction = min(diff * 3, 20)
         return max(40, base_gap - reduction)
 
-    def spawn_pipe(self) -> tuple:
+    def _get_rightmost_pipe_x(self) -> int:
+        """Find the x position of the rightmost active pipe."""
+        x = 0
+        for pipe in self.pipes:
+            if pipe.active and pipe.x_pos > x:
+                x = pipe.x_pos
+        return x
+
+    def _get_next_pipe_x(self) -> int:
+        """Calculate next pipe X position relative to rightmost pipe.
+        Matches Saturn getNextPipePosition() exactly."""
+        rightmost = self._get_rightmost_pipe_x()
+        if rightmost <= 0:
+            return PIPE_SPAWN_X  # 256 - same as Saturn
+        diff = self.get_difficulty()
+        return rightmost + (180 - 10 * diff) + random.randint(0, max(1, 200 - 10 * diff))
+
+    def spawn_pipe(self, x_override: int = None) -> tuple:
         """Spawn a new pipe. Returns (slot, pipe_data) or None.
         Matches Saturn initPipe() exactly:
           y_pos = -20 + random(60)           -> bottom pipe Y
@@ -533,7 +556,7 @@ class GameSimulation:
 
         pipe = self.pipes[slot]
         pipe.active = True
-        pipe.x_pos = PIPE_SPAWN_X
+        pipe.x_pos = x_override if x_override is not None else self._get_next_pipe_x()
         pipe.y_pos = -20 + random.randint(0, 60)  # matching Saturn: -20 + jo_random(60)
         pipe.num_sections = PIPE_NUM_SECTIONS      # always 10
         pipe.gap = self.get_pipe_gap()
@@ -547,9 +570,27 @@ class GameSimulation:
             pipe.top_y_pos = -220
 
         pipe.scored_by = set()
+        pipe.speed_bumped = False
 
         return (slot, pipe.x_pos, pipe.y_pos, pipe.gap,
                 pipe.num_sections, pipe.top_y_pos)
+
+    def _init_pipes(self) -> list:
+        """Pre-spawn all 6 pipes at game start, matching offline behavior.
+        Returns list of pipe_spawn event tuples for broadcasting."""
+        events = []
+        # First pipe at x=160 (slightly off-screen right)
+        x = 160
+        diff = self.get_difficulty()
+        for i in range(MAX_PIPES):
+            result = self.spawn_pipe(x_override=x)
+            if result:
+                events.append(("pipe_spawn",) + result)
+            # Next pipe offset from this one (matching getNextPipePosition)
+            base = 180 - 10 * diff
+            jitter = random.randint(0, max(1, 200 - 10 * diff))
+            x = x + base + jitter
+        return events
 
     def spawn_powerup(self) -> tuple:
         """Spawn a new powerup. Returns (slot, type, x, y) or None."""
@@ -715,16 +756,20 @@ class GameSimulation:
                         p.num_points += 1
                         events.append(("score_update", pid,
                                         p.num_points, p.num_deaths))
-                        # Progressive speed: increase per gate
-                        self.pipe_speed += PIPE_SPEED_PER_GATE
+                        # Progressive speed: increase once per pipe (first scorer only)
+                        if not pipe.speed_bumped:
+                            pipe.speed_bumped = True
+                            self.pipe_speed += PIPE_SPEED_PER_GATE
 
                     # Collision with pipe -- only for bots
                     if pid in self.bot_ids:
                         if self._check_pipe_collision(p, pipe):
                             events.append(("player_kill", pid))
 
-            # Check powerup collisions
+            # Check powerup collisions (bots only; humans report via CLIENT_POWERUP_COLLECT)
             for pid, p in self.players.items():
+                if pid not in self.bot_ids:
+                    continue
                 if p.state != FLICKYSTATE_FLYING:
                     continue
                 if not p.has_flapped:
@@ -750,13 +795,12 @@ class GameSimulation:
             else:
                 final_events.append(evt)
 
-        # Pipe spawning
-        self.pipe_spawn_timer -= self.TICK_RATIO
-        if self.pipe_spawn_timer <= 0:
-            self.pipe_spawn_timer = self.get_pipe_spawn_interval()
-            result = self.spawn_pipe()
-            if result:
-                final_events.append(("pipe_spawn",) + result)
+        # Pipe spawning: recycle-based (spawn into any inactive slot)
+        for i in range(MAX_PIPES):
+            if not self.pipes[i].active:
+                result = self.spawn_pipe()
+                if result:
+                    final_events.append(("pipe_spawn",) + result)
 
         # Powerup spawning
         self.powerup_spawn_timer -= self.TICK_RATIO
@@ -971,6 +1015,324 @@ class BotPlayer:
 
 
 # ==========================================================================
+# Admin Portal HTML + Handler
+# ==========================================================================
+
+ADMIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Flicky's Flock Admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#1a1a2e;color:#e0e0e0;font-family:-apple-system,system-ui,monospace;padding:12px;font-size:14px}
+h1{color:#f5a623;margin-bottom:8px;font-size:20px}
+h3{font-size:15px;margin-bottom:8px}
+.info{color:#888;margin-bottom:12px;font-size:13px}
+.panel{background:#16213e;padding:12px;border-radius:5px;margin:8px 0;overflow-x:auto}
+table{width:100%;border-collapse:collapse;margin:6px 0;min-width:280px}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #333;white-space:nowrap;font-size:13px}
+th{background:#0f1a2e;color:#f5a623}
+tr:hover{background:#1a2744}
+.btn{background:#f5a623;color:#000;border:none;padding:8px 16px;cursor:pointer;font-family:inherit;font-size:13px;border-radius:3px;touch-action:manipulation;font-weight:bold}
+.btn:active{opacity:0.7}
+.btn-warn{background:#e94560;color:#fff}
+.btn-danger{background:#d32f2f;color:#fff}
+.status{display:inline-block;padding:2px 8px;border-radius:3px;font-size:12px}
+.status-lobby{background:#2ecc71;color:#000}
+.status-ingame{background:#3498db;color:#fff}
+.status-dead{background:#7f8c8d;color:#fff}
+#msg{position:fixed;top:10px;left:50%;transform:translateX(-50%);background:#2ecc71;color:#000;padding:10px 20px;border-radius:5px;display:none;font-weight:bold;z-index:9}
+.cards{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0}
+.card{flex:1;min-width:80px;background:#0f1a2e;border-radius:4px;padding:8px;text-align:center}
+.card-label{font-size:11px;color:#888;margin-bottom:2px}
+.card-value{font-size:16px;font-weight:bold;color:#e0e0e0}
+.tabs{display:flex;gap:4px;margin-bottom:8px}
+.tab{padding:8px 16px;background:#0f1a2e;color:#888;border:none;cursor:pointer;font-family:inherit;font-size:13px;border-radius:3px 3px 0 0}
+.tab.active{background:#16213e;color:#f5a623;font-weight:bold}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.player-row{background:#0f1a2e;border-radius:4px;padding:10px;margin:6px 0}
+.player-name{font-weight:bold;font-size:15px;margin-bottom:4px}
+.player-details{font-size:12px;color:#999;display:flex;flex-wrap:wrap;gap:8px;margin:4px 0}
+.controls{display:flex;gap:10px;flex-wrap:wrap}
+@media(max-width:699px){body{padding:8px}}
+</style></head><body>
+<h1>Flicky's Flock Admin</h1>
+<div class="info">Next refresh: <span id="countdown">3</span>s | <span id="uptime">-</span> | <span id="status_dot" style="color:#2ecc71">&#9679;</span></div>
+<div id="msg"></div>
+
+<div class="tabs">
+<button class="tab active" onclick="showTab('dashboard')">Dashboard</button>
+<button class="tab" onclick="showTab('history')">Join History</button>
+</div>
+
+<div id="tab-dashboard" class="tab-content active">
+
+<div class="panel">
+<h3>Server Status</h3>
+<div class="cards">
+<div class="card"><div class="card-label">Game</div><div class="card-value" id="g_active">-</div></div>
+<div class="card"><div class="card-label">Phase</div><div class="card-value" id="g_phase">-</div></div>
+<div class="card"><div class="card-label">Players</div><div class="card-value" id="g_players">-</div></div>
+<div class="card"><div class="card-label">Bots</div><div class="card-value" id="g_bots">-</div></div>
+<div class="card"><div class="card-label">Pipes</div><div class="card-value" id="g_pipes">-</div></div>
+<div class="card"><div class="card-label">Speed</div><div class="card-value" id="g_speed">-</div></div>
+<div class="card"><div class="card-label">Total Joins</div><div class="card-value" id="g_total_joins">-</div></div>
+</div></div>
+
+<div class="panel">
+<h3>Connected Players</h3>
+<table><thead><tr><th>Name</th><th>Status</th><th>Score</th><th>Deaths</th><th>IP</th><th>Idle</th><th>Action</th></tr></thead>
+<tbody id="ptable"></tbody></table>
+</div>
+
+<div class="panel">
+<h3>Server Controls</h3>
+<div class="controls">
+<button class="btn btn-warn" onclick="endGame()">End Game</button>
+<button class="btn btn-danger" onclick="restartServer()">Restart Server</button>
+</div></div>
+
+</div>
+
+<div id="tab-history" class="tab-content">
+<div class="panel">
+<h3>Join History (Last 200)</h3>
+<table><thead><tr><th>Time</th><th>Name</th><th>IP</th><th>Event</th></tr></thead>
+<tbody id="htable"></tbody></table>
+</div>
+</div>
+
+<script>
+var REFRESH_SEC=3,countdown=REFRESH_SEC,BASE='';
+(function(){var p=location.pathname;if(p.indexOf('/flickyadmin')===0)BASE='/flickyadmin/';else BASE='/'})();
+
+function showTab(name){
+  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});
+  document.querySelectorAll('.tab-content').forEach(function(t){t.classList.remove('active')});
+  document.getElementById('tab-'+name).classList.add('active');
+  document.querySelectorAll('.tab').forEach(function(t){if(t.textContent.toLowerCase().indexOf(name)>=0||
+    (name==='dashboard'&&t.textContent==='Dashboard')||(name==='history'&&t.textContent==='Join History'))t.classList.add('active')});
+  if(name==='history')loadHistory();
+}
+function showMsg(t,c){var m=document.getElementById('msg');m.textContent=t;m.style.background=c||'#2ecc71';m.style.display='block';setTimeout(function(){m.style.display='none'},3000)}
+function api(method,path,body){
+  var url=BASE+path;
+  var opts={method:method};
+  if(body){opts.headers={'Content-Type':'application/json'};opts.body=JSON.stringify(body)}
+  return fetch(url,opts)
+  .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})
+  .catch(function(e){document.getElementById('status_dot').style.color='#d32f2f';return{}})
+}
+function kick(uuid,name){if(confirm('Kick '+name+'?'))api('POST','api/kick',{uuid:uuid}).then(function(r){if(r.message)showMsg(r.message);refresh()})}
+function endGame(){if(confirm('End the current game?'))api('POST','api/end_game').then(function(r){if(r.message)showMsg(r.message);refresh()})}
+function restartServer(){if(confirm('RESTART the server? All connections will drop.'))api('POST','api/restart').then(function(r){if(r.message)showMsg(r.message,'#e94560')})}
+function fmtTime(s){if(s<0)return'-';var m=Math.floor(s/60),sec=Math.floor(s%60);return m>0?m+'m '+sec+'s':sec+'s'}
+function refresh(){
+  countdown=REFRESH_SEC;
+  api('GET','api/state').then(function(d){
+    if(!d.game)return;
+    document.getElementById('status_dot').style.color='#2ecc71';
+    document.getElementById('uptime').textContent='Up '+fmtTime(d.uptime);
+    var g=d.game;
+    document.getElementById('g_active').textContent=g.active?'ACTIVE':'Lobby';
+    document.getElementById('g_phase').textContent=g.active?'Playing':'Waiting';
+    document.getElementById('g_players').textContent=g.human_count;
+    document.getElementById('g_bots').textContent=g.bot_count;
+    document.getElementById('g_pipes').textContent=g.active_pipes;
+    document.getElementById('g_speed').textContent=g.pipe_speed;
+    document.getElementById('g_total_joins').textContent=d.total_joins;
+    var tb=document.getElementById('ptable');tb.innerHTML='';
+    if(d.players.length===0){
+      tb.innerHTML='<tr><td colspan="7" style="color:#888;text-align:center">No players connected</td></tr>';
+    }
+    d.players.forEach(function(p){
+      var sc='status-lobby';
+      if(p.status==='in-game')sc='status-ingame';
+      else if(p.status==='dead')sc='status-dead';
+      var tr=document.createElement('tr');
+      var kb='<button class="btn" data-uuid="'+p.uuid+'" data-name="'+p.username+'">Kick</button>';
+      tr.innerHTML='<td><b>'+p.username+'</b></td>'
+        +'<td><span class="status '+sc+'">'+p.status+'</span></td>'
+        +'<td>'+p.score+'</td><td>'+p.deaths+'</td>'
+        +'<td>'+p.address+'</td>'
+        +'<td>'+fmtTime(p.idle)+'</td>'
+        +'<td>'+kb+'</td>';
+      tb.appendChild(tr);
+    })
+  })
+}
+function loadHistory(){
+  api('GET','api/history').then(function(d){
+    if(!d.entries)return;
+    var tb=document.getElementById('htable');tb.innerHTML='';
+    d.entries.forEach(function(e){
+      var tr=document.createElement('tr');
+      tr.innerHTML='<td>'+e.time+'</td><td>'+e.name+'</td><td>'+e.ip+'</td><td>'+e.event+'</td>';
+      tb.appendChild(tr);
+    })
+  })
+}
+function tick(){countdown--;if(countdown<=0)refresh();document.getElementById('countdown').textContent=Math.max(countdown,0)}
+document.addEventListener('click',function(e){var b=e.target;if(b.tagName==='BUTTON'&&b.dataset.uuid){kick(b.dataset.uuid,b.dataset.name)}});
+refresh();setInterval(tick,1000);
+</script></body></html>"""
+
+
+def _make_flock_admin_handler(server_ref):
+    """Create an AdminHandler class bound to the FlockServer instance."""
+
+    class FlockAdminHandler(BaseHTTPRequestHandler):
+        flock_server = server_ref
+
+        def log_message(self, fmt, *args):
+            log.debug("Admin HTTP: " + fmt, *args)
+
+        def _check_auth(self):
+            if self.headers.get("X-Admin-Auth") == "nginx-verified":
+                return True
+            auth = self.headers.get("Authorization", "")
+            if not auth.startswith("Basic "):
+                self._send_auth_required()
+                return False
+            try:
+                decoded = base64.b64decode(auth[6:]).decode("utf-8")
+                user, pwd = decoded.split(":", 1)
+            except Exception:
+                self._send_auth_required()
+                return False
+            srv = self.flock_server
+            if user != srv._admin_user or pwd != srv._admin_password:
+                self._send_auth_required()
+                return False
+            return True
+
+        def _send_auth_required(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="Flicky Admin"')
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", "12")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"Unauthorized")
+            self.close_connection = True
+
+        def _send_json(self, data, code=200):
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = True
+
+        def do_GET(self):
+            if not self._check_auth():
+                return
+            path = urlparse(self.path).path
+            if path == "/":
+                body = ADMIN_HTML.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+                self.close_connection = True
+            elif path == "/api/state":
+                self._send_json(self._build_state())
+            elif path == "/api/history":
+                self._send_json(self._build_history())
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            if not self._check_auth():
+                return
+            path = urlparse(self.path).path
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b""
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+
+            srv = self.flock_server
+            if path == "/api/kick":
+                target_uuid = data.get("uuid", "")
+                if not target_uuid:
+                    self._send_json({"error": "missing uuid"}, 400)
+                    return
+                srv._admin_command_queue.put({"cmd": "kick", "uuid": target_uuid})
+                self._send_json({"message": "Kick queued"})
+            elif path == "/api/end_game":
+                srv._admin_command_queue.put({"cmd": "end_game"})
+                self._send_json({"message": "End game queued"})
+            elif path == "/api/restart":
+                srv._admin_command_queue.put({"cmd": "restart"})
+                self._send_json({"message": "Restart queued"})
+            else:
+                self.send_error(404)
+
+        def _build_state(self):
+            srv = self.flock_server
+            now = time.time()
+            players = []
+            for sock, info in list(srv.clients.items()):
+                if not info.authenticated:
+                    continue
+                if info.in_game:
+                    sim_player = srv.sim.players.get(info.game_player_id) if srv.sim else None
+                    if sim_player and sim_player.state in (FLICKYSTATE_DYING, FLICKYSTATE_DEAD):
+                        status = "dead"
+                    else:
+                        status = "in-game"
+                    score = sim_player.num_points if sim_player else 0
+                    deaths = sim_player.num_deaths if sim_player else 0
+                else:
+                    status = "lobby"
+                    score = 0
+                    deaths = 0
+                players.append({
+                    "username": info.username,
+                    "uuid": info.uuid,
+                    "status": status,
+                    "address": "%s:%d" % (info.address[0], info.address[1]),
+                    "idle": round(now - info.last_activity, 1),
+                    "ready": info.ready,
+                    "score": score,
+                    "deaths": deaths,
+                })
+
+            active_pipes = 0
+            pipe_speed = "1.0"
+            if srv.sim:
+                active_pipes = sum(1 for p in srv.sim.pipes if p.active)
+                pipe_speed = "%.1f" % (srv.sim.pipe_speed / 256.0)
+
+            return {
+                "uptime": round(now - srv._start_time, 1),
+                "total_joins": len(srv._join_history),
+                "players": players,
+                "game": {
+                    "active": srv.game_active,
+                    "human_count": len([c for c in srv.clients.values() if c.authenticated]),
+                    "bot_count": len(srv.bots),
+                    "active_pipes": active_pipes,
+                    "pipe_speed": pipe_speed,
+                },
+            }
+
+        def _build_history(self):
+            srv = self.flock_server
+            entries = list(srv._join_history[-200:])
+            entries.reverse()
+            return {"entries": entries}
+
+    return FlockAdminHandler
+
+
+# ==========================================================================
 # Client Info
 # ==========================================================================
 
@@ -1007,13 +1369,16 @@ class ClientInfo:
 
 class FlockServer:
     def __init__(self, host: str = "0.0.0.0", port: int = 4824,
-                 num_bots: int = 0):
+                 num_bots: int = 0, admin_port: int = 0,
+                 admin_user: str = "admin",
+                 admin_password: str = "flock2026"):
         self.host = host
         self.port = port
         self.clients: dict = {}
         self.uuid_map: dict = {}
         self.server_socket = None
         self._running = False
+        self._start_time = time.time()
 
         # Bridge auth
         self.pending_auth: dict = {}
@@ -1047,6 +1412,20 @@ class FlockServer:
         self._last_tick = 0.0
         self._tick_interval = 1.0 / GameSimulation.TICK_RATE
 
+        # Admin portal
+        self._admin_port = admin_port
+        self._admin_user = admin_user
+        self._admin_password = admin_password
+        self._admin_command_queue = queue.Queue()
+        self._admin_httpd = None
+        self._admin_thread = None
+
+        # Join history (persistent across server lifetime)
+        self._join_history = []
+        self._join_history_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "join_history.json")
+        self._load_join_history()
+
     def _load_leaderboard(self):
         try:
             if os.path.exists(self._leaderboard_path):
@@ -1065,6 +1444,78 @@ class FlockServer:
                 json.dump({"players": self.leaderboard}, f, indent=2)
         except Exception as e:
             log.warning("Failed to save leaderboard: %s", e)
+
+    def _load_join_history(self):
+        try:
+            if os.path.exists(self._join_history_path):
+                with open(self._join_history_path, "r") as f:
+                    self._join_history = json.load(f)
+                log.info("Loaded join history: %d entries",
+                         len(self._join_history))
+        except Exception as e:
+            log.warning("Failed to load join history: %s", e)
+            self._join_history = []
+
+    def _save_join_history(self):
+        try:
+            # Keep last 1000 entries
+            if len(self._join_history) > 1000:
+                self._join_history = self._join_history[-1000:]
+            with open(self._join_history_path, "w") as f:
+                json.dump(self._join_history, f, indent=2)
+        except Exception as e:
+            log.warning("Failed to save join history: %s", e)
+
+    def _log_join(self, name: str, ip: str, event: str):
+        entry = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "name": name,
+            "ip": ip,
+            "event": event,
+        }
+        self._join_history.append(entry)
+        self._save_join_history()
+
+    def _start_admin_server(self):
+        if not self._admin_port:
+            return
+        handler_class = _make_flock_admin_handler(self)
+        try:
+            self._admin_httpd = HTTPServer(
+                ("0.0.0.0", self._admin_port), handler_class)
+        except OSError as e:
+            log.error("Failed to start admin server on port %d: %s",
+                      self._admin_port, e)
+            return
+        self._admin_thread = threading.Thread(
+            target=self._admin_httpd.serve_forever, daemon=True)
+        self._admin_thread.start()
+        log.info("Admin portal listening on http://0.0.0.0:%d/",
+                 self._admin_port)
+
+    def _process_admin_commands(self):
+        while not self._admin_command_queue.empty():
+            try:
+                cmd = self._admin_command_queue.get_nowait()
+            except queue.Empty:
+                break
+            if cmd["cmd"] == "kick":
+                target_uuid = cmd.get("uuid", "")
+                for sock, info in list(self.clients.items()):
+                    if info.uuid == target_uuid:
+                        log.info("Admin kicked %s", info.username)
+                        self._log_join(info.username,
+                                       "%s:%d" % (info.address[0], info.address[1]),
+                                       "kicked-by-admin")
+                        self._remove_client(sock, "kicked by admin")
+                        break
+            elif cmd["cmd"] == "end_game":
+                if self.game_active and self.sim:
+                    log.info("Admin ended game")
+                    self.sim.game_over = True
+            elif cmd["cmd"] == "restart":
+                log.info("Admin requested restart")
+                self._running = False
 
     def _update_leaderboard(self, winner_id):
         if not self.sim:
@@ -1178,6 +1629,7 @@ class FlockServer:
         log.info("Flicky's Flock Server listening on %s:%d",
                  self.host, self.port)
         self._running = True
+        self._start_admin_server()
         self._run()
 
     def _run(self):
@@ -1211,6 +1663,7 @@ class FlockServer:
                     self._game_tick()
 
             self._check_timeouts(now)
+            self._process_admin_commands()
 
     def _accept_connection(self):
         try:
@@ -1369,6 +1822,8 @@ class FlockServer:
             self._handle_client_death(sock, client, None)
         elif msg_type == FNET_MSG_CLIENT_DEATH_P2:
             self._handle_client_death(sock, client, payload)
+        elif msg_type == FNET_MSG_CLIENT_POWERUP_COLLECT:
+            self._handle_client_powerup_collect(sock, client, payload)
         else:
             log.debug("Unknown message type 0x%02X from %s",
                       msg_type, client.address)
@@ -1440,6 +1895,9 @@ class FlockServer:
         client.sprite_id = self._next_available_sprite()
         self.uuid_map[client.uuid] = username
 
+        self._log_join(username,
+                       "%s:%d" % (client.address[0], client.address[1]),
+                       "joined")
         log.info("Player %d set username: %s", client.user_id, username)
         client.send_raw(build_welcome(
             client.user_id, client.uuid, username))
@@ -1730,6 +2188,11 @@ class FlockServer:
             for r_pid, name, sprite in roster:
                 c.send_raw(build_player_join(r_pid, name, sprite))
 
+        # Pre-spawn all 6 pipes and broadcast to all clients
+        pipe_events = self.sim._init_pipes()
+        for evt in pipe_events:
+            self._broadcast_event(evt)
+
     # ------------------------------------------------------------------
     # In-game handlers
     # ------------------------------------------------------------------
@@ -1840,6 +2303,40 @@ class FlockServer:
             self._broadcast_to_game(score_msg)
 
         log.info("Player %d death reported by client", player_id)
+
+    def _handle_client_powerup_collect(self, sock, client: ClientInfo,
+                                        payload: bytes):
+        """Client reports collecting a powerup (client-authoritative).
+        Deactivate the powerup on server and broadcast effect to OTHER clients."""
+        if not self.game_active or not client.in_game:
+            return
+        if len(payload) < 2:
+            return
+
+        slot = payload[1]
+        if slot >= MAX_POWER_UPS:
+            return
+        if not self.sim:
+            return
+
+        pu = self.sim.powerups[slot]
+        if not pu.active:
+            return
+
+        pu_type = pu.type
+        pu.active = False
+
+        # Determine picker_id (primary player for this client)
+        picker_id = client.game_player_id
+
+        # Broadcast POWERUP_EFFECT to all OTHER clients (sender already applied locally)
+        effect_msg = build_powerup_effect(pu_type, picker_id)
+        for s, c in self.clients.items():
+            if c.in_game and s != sock:
+                c.send_raw(effect_msg)
+
+        log.info("Player %d collected powerup slot %d (type %d)",
+                 picker_id, slot, pu_type)
 
     # ------------------------------------------------------------------
     # Game simulation tick
@@ -2014,6 +2511,10 @@ class FlockServer:
     def _remove_client(self, sock, reason: str):
         client = self.clients.get(sock)
         if client:
+            if client.authenticated:
+                self._log_join(client.username or "unknown",
+                               "%s:%d" % (client.address[0], client.address[1]),
+                               "left: %s" % reason)
             log.info("Removing %s (%s): %s",
                      client.username or "unknown", client.address, reason)
 
@@ -2120,6 +2621,12 @@ def main():
                         help="Bind port")
     parser.add_argument("--bots", type=int, default=0,
                         help="Number of server-side bot players (0-11)")
+    parser.add_argument("--admin-port", type=int, default=0,
+                        help="Admin HTTP port (0=disabled)")
+    parser.add_argument("--admin-user", default="admin",
+                        help="Admin username")
+    parser.add_argument("--admin-password", default="flock2026",
+                        help="Admin password")
     parser.add_argument("--verbose", action="store_true",
                         help="Debug logging")
     args = parser.parse_args()
@@ -2128,7 +2635,10 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
 
     server = FlockServer(host=args.host, port=args.port,
-                         num_bots=args.bots)
+                         num_bots=args.bots,
+                         admin_port=args.admin_port,
+                         admin_user=args.admin_user,
+                         admin_password=args.admin_password)
     if args.bots > 0:
         log.info("Starting with %d bot(s): %s", args.bots,
                  ", ".join(b.name for b in server.bots))

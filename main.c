@@ -976,6 +976,7 @@ void gameplay_draw(void)
             const fnet_state_data_t* nd = fnet_get_data();
             FLICKY sortedHUD[MAX_PLAYERS];
             int myPlace = 1;
+            int myPlace2 = 1;
             int numActive = 0;
             int si;
 
@@ -995,7 +996,6 @@ void gameplay_draw(void)
                 int pid = sortedHUD[si].playerID;
                 int ri;
 
-                // Check if this player is in the game roster
                 for (ri = 0; ri < nd->game_roster_count && ri < FNET_MAX_PLAYERS; ri++)
                 {
                     if (nd->game_roster[ri].active && nd->game_roster[ri].id == (uint8_t)pid)
@@ -1010,20 +1010,25 @@ void gameplay_draw(void)
 
                 if (pid == g_Game.myPlayerID)
                     myPlace = numActive;
+                if (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2)
+                    myPlace2 = numActive;
             }
 
             // Draw scoreboard table rows (top-left)
+            // Layout: col 0-1=rank, col 3=bird, col 5-10=name, col 11-13=gates, col 14=deaths, col 15=status
             {
                 int row = 0;
-                font_draw("#  NAME     PTS", FONT_X(1), FONT_Y(1), 600);
+                font_draw("#    NAME  PTS D", FONT_X(0), FONT_Y(1), 600);
 
-                for (si = 0; si < MAX_PLAYERS && row < 12; si++)
+                for (si = 0; si < MAX_PLAYERS && row < 8; si++)
                 {
                     bool isActive = false;
                     int pid = sortedHUD[si].playerID;
                     const char* pname = "";
-                    const char* status = "";
                     int ri;
+                    int ry = FONT_Y(2 + row);
+                    bool isLocal = (pid == g_Game.myPlayerID) ||
+                                   (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2);
 
                     for (ri = 0; ri < nd->game_roster_count && ri < FNET_MAX_PLAYERS; ri++)
                     {
@@ -1037,54 +1042,73 @@ void gameplay_draw(void)
 
                     if (!isActive) continue;
 
-                    if (sortedHUD[si].state == FLICKYSTATE_DYING ||
-                        sortedHUD[si].state == FLICKYSTATE_DEAD)
-                        status = "X";
-                    else
-                        status = "";
-
-                    // Draw small bird sprite in the row
+                    // Bird sprite in its own column (col 3, z=599 = in front of text)
                     jo_sprite_draw3D(g_FlickySprites[sortedHUD[si].spriteID % MAX_FLICKY_SPRITES].up,
-                                     FONT_X(4), FONT_Y(2 + row) + 4, 600);
+                                     FONT_X(3), ry + 4, 599);
 
-                    // Highlight local player with '>' marker
-                    if (pid == g_Game.myPlayerID ||
-                        (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2))
+                    // Local player marker + rank + name + score + deaths + status
+                    if (isLocal)
                     {
-                        font_printf(FONT_X(1), FONT_Y(2 + row), 600,
-                                    ">%d %-8.8s %3d %s",
-                                    row + 1, pname, sortedHUD[si].numPoints, status);
+                        font_printf(FONT_X(0), ry, 600,
+                                    ">%d  %-6.6s%3d %d%s",
+                                    row + 1, pname, sortedHUD[si].numPoints,
+                                    sortedHUD[si].numDeaths,
+                                    (sortedHUD[si].state == FLICKYSTATE_DYING ||
+                                     sortedHUD[si].state == FLICKYSTATE_DEAD) ? "X" : "");
                     }
                     else
                     {
-                        font_printf(FONT_X(1), FONT_Y(2 + row), 600,
-                                    "%2d %-8.8s %3d %s",
-                                    row + 1, pname, sortedHUD[si].numPoints, status);
+                        font_printf(FONT_X(0), ry, 600,
+                                    "%2d  %-6.6s%3d %d%s",
+                                    row + 1, pname, sortedHUD[si].numPoints,
+                                    sortedHUD[si].numDeaths,
+                                    (sortedHUD[si].state == FLICKYSTATE_DYING ||
+                                     sortedHUD[si].state == FLICKYSTATE_DEAD) ? "X" : "");
                     }
 
                     row++;
                 }
             }
 
-            // Draw BIG place number (top-right)
+            // Draw BIG place number for P1 (top-right)
             {
                 int placeOnes = myPlace % 10;
                 int placeTens = myPlace / 10;
 
-                jo_sprite_change_sprite_scale(3.0);
+                jo_sprite_change_sprite_scale(2.5);
                 if (placeTens > 0)
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens], 120, -96, 600);
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 148, -96, 600);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens], 118, -56, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 142, -56, 500);
                 }
                 else
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 134, -96, 600);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 130, -56, 500);
                 }
                 jo_sprite_change_sprite_scale(1.0);
 
-                // Draw "#" label above the place number
-                font_draw("#", 130, FONT_Y(1), 600);
+                font_draw("P1#", FONT_X(35), FONT_Y(1), 500);
+            }
+
+            // Draw BIG place number for P2 (below P1, if co-op)
+            if (g_Game.hasSecondLocal && g_Game.myPlayerID2 != 0xFF)
+            {
+                int placeOnes2 = myPlace2 % 10;
+                int placeTens2 = myPlace2 / 10;
+
+                jo_sprite_change_sprite_scale(2.5);
+                if (placeTens2 > 0)
+                {
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens2], 118, -16, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 142, -16, 500);
+                }
+                else
+                {
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 130, -16, 500);
+                }
+                jo_sprite_change_sprite_scale(1.0);
+
+                font_draw("P2#", FONT_X(35), FONT_Y(6), 500);
             }
         }
     }

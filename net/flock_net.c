@@ -489,7 +489,11 @@ static void process_score_update(const uint8_t* payload, int len)
     points = read_u16(&payload[2]);
     deaths = read_u16(&payload[4]);
 
-    /* Track point changes to increase progressive speed */
+    /* Track point changes to increase progressive speed.
+     * Only bump speed for local player scores to match server's
+     * once-per-pipe speed bump (server bumps on first scorer per pipe). */
+    if (pid == g_Game.myPlayerID ||
+        (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2))
     {
         int old_points = g_Players[pid].numPoints;
         int new_points = (int)points;
