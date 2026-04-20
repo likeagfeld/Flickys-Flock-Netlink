@@ -510,6 +510,11 @@ static void process_powerup_effect(const uint8_t* payload, int len)
     type = payload[1];
     picker_id = payload[2];
 
+    /* If the local player collected this powerup, we already applied it
+     * locally via applyPowerUp(). Skip to avoid double-applying. */
+    if (picker_id == g_net.my_player_id) return;
+    if (g_Game.hasSecondLocal && picker_id == g_Game.myPlayerID2) return;
+
     /* Apply powerup effects based on type */
     switch (type) {
     case POWERUP_ONE_UP:
@@ -1038,6 +1043,14 @@ void fnet_send_player_death_p2(void)
     if (g_net.state != FNET_STATE_PLAYING || !g_net.transport) return;
     if (g_Game.myPlayerID2 == 0xFF) return;
     len = fnet_encode_client_death_p2(g_net.tx_buf, g_Game.myPlayerID2);
+    net_transport_send(g_net.transport, g_net.tx_buf, len);
+}
+
+void fnet_send_powerup_collect(int slot)
+{
+    int len;
+    if (g_net.state != FNET_STATE_PLAYING || !g_net.transport) return;
+    len = fnet_encode_client_powerup_collect(g_net.tx_buf, (uint8_t)slot);
     net_transport_send(g_net.transport, g_net.tx_buf, len);
 }
 

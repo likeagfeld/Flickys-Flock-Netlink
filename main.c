@@ -716,13 +716,18 @@ void gameplay_draw(void)
     // draw players
     for(int i = 0; i < MAX_PLAYERS; i++)
     {
+        // In online mode, determine if this is a local player
+        bool isLocalPlayer = (!g_Game.isOnlineMode) ||
+                             (i == g_Game.myPlayerID) ||
+                             (g_Game.hasSecondLocal && i == g_Game.myPlayerID2);
+
         g_Players[i].spawnFrameTimer++;
         if(g_Players[i].spawnFrameTimer >= SPAWN_FRAME_TIMER)
         {
             // 5 seconds have passed, player must play
             g_Players[i].hasFlapped = true;
         }
-        else
+        else if(isLocalPlayer)
         {
             // the player just spawned, skip every 4th frame so they flash
             // don't flash invulnerable on the first spawn
@@ -735,58 +740,64 @@ void gameplay_draw(void)
         // only draw flying player or dying players
         if(g_Players[i].state == FLICKYSTATE_FLYING)
         {
-            // if reverse gravity is enabled, flip the player upside down
-            if(g_Players[i].reverseGravityTimer > 0)
+            // Only render sprites for local players (online: skip remote birds)
+            if(isLocalPlayer)
             {
-                jo_sprite_enable_vertical_flip();
-            }
+                // if reverse gravity is enabled, flip the player upside down
+                if(g_Players[i].reverseGravityTimer > 0)
+                {
+                    jo_sprite_enable_vertical_flip();
+                }
 
-            // if lightning is enabled, shrink the player
-            if(g_Players[i].lightningTimer > 0)
-            {
-                jo_sprite_change_sprite_scale(0.75);
-            }
+                // if lightning is enabled, shrink the player
+                if(g_Players[i].lightningTimer > 0)
+                {
+                    jo_sprite_change_sprite_scale(0.75);
+                }
 
-            // if flying, draw player with their angle
-            if(g_Players[i].flapping)
-            {
-                jo_sprite_draw3D_and_rotate(g_FlickySprites[g_Players[i].spriteID].up, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos, g_Players[i].angle);
-            }
-            else
-            {
-                jo_sprite_draw3D_and_rotate(g_FlickySprites[g_Players[i].spriteID].down, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos, g_Players[i].angle);
-            }
+                // if flying, draw player with their angle
+                if(g_Players[i].flapping)
+                {
+                    jo_sprite_draw3D_and_rotate(g_FlickySprites[g_Players[i].spriteID].up, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos, g_Players[i].angle);
+                }
+                else
+                {
+                    jo_sprite_draw3D_and_rotate(g_FlickySprites[g_Players[i].spriteID].down, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos, g_Players[i].angle);
+                }
 
-            if(g_Players[i].reverseGravityTimer > 0)
-            {
-                jo_sprite_disable_vertical_flip();
-            }
+                if(g_Players[i].reverseGravityTimer > 0)
+                {
+                    jo_sprite_disable_vertical_flip();
+                }
 
-            if(g_Players[i].lightningTimer > 0)
-            {
-                jo_sprite_change_sprite_scale(1);
+                if(g_Players[i].lightningTimer > 0)
+                {
+                    jo_sprite_change_sprite_scale(1);
+                }
             }
         }
         else if(g_Players[i].state == FLICKYSTATE_DYING)
         {
-            // if lightning is enabled, shrink the player
-            if(g_Players[i].lightningTimer > 0)
+            // Only render death sprite for local players
+            if(isLocalPlayer)
             {
-                jo_sprite_change_sprite_scale(0.75);
+                // if lightning is enabled, shrink the player
+                if(g_Players[i].lightningTimer > 0)
+                {
+                    jo_sprite_change_sprite_scale(0.75);
+                }
+
+                jo_sprite_draw3D(g_FlickySprites[g_Players[i].spriteID].death, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos);
+
+                if(g_Players[i].lightningTimer > 0)
+                {
+                    jo_sprite_change_sprite_scale(1);
+                }
             }
 
-            jo_sprite_draw3D(g_FlickySprites[g_Players[i].spriteID].death, g_Players[i].x_pos, g_Players[i].y_pos, g_Players[i].z_pos);
-
-            if(g_Players[i].lightningTimer > 0)
-            {
-                jo_sprite_change_sprite_scale(1);
-            }
-
-            // death animination flies up and pauses
+            // death animation state transitions (always process for all players)
             if(g_Players[i].frameTimer >= DEATH_FRAME_TIMER_FLYING)
             {
-                // only adjust the height if the player is below the max
-                // if I don't do this they will float off the top of the screen
                 if(g_Players[i].y_pos > MAX_DEATH_HEIGHT)
                 {
                     g_Players[i].y_pos -= 2;
@@ -936,33 +947,177 @@ void gameplay_draw(void)
     }
 
     // draw the score
-    topScore = getTopScore();
-    hunds = (topScore/100);
-    tens = (topScore/10) % 10;
-    ones = topScore % 10;
+    if (g_Game.isOnlineMode)
+    {
+        // Online mode: show local player's own score (center top)
+        int myScore = g_Players[g_Game.myPlayerID].numPoints;
+        hunds = (myScore / 100);
+        tens = (myScore / 10) % 10;
+        ones = myScore % 10;
 
-    // check if the player passed 100 (local mode only; online uses server GAME_OVER)
-    if(!g_Game.isOnlineMode && topScore >= VICTORY_CONDITION)
-    {
-        g_Game.topScore = topScore;
-        transitionToGameOverOrPause(false);
-        return;
-    }
+        if(hunds != 0)
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[hunds], -16, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], 0, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 16, -76, 502);
+        }
+        else if(tens != 0)
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], -8, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 8, -76, 502);
+        }
+        else
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 0, -76, 502);
+        }
 
-    if(hunds != 0)
-    {
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[hunds], -16, -76, 502);
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], 0, -76, 502);
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 16, -76, 502);
-    }
-    else if(tens != 0)
-    {
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], -8, -76, 502);
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 8, -76, 502);
+        // Online HUD: Scoreboard table (top-left) + big place number (top-right)
+        {
+            const fnet_state_data_t* nd = fnet_get_data();
+            FLICKY sortedHUD[MAX_PLAYERS];
+            int myPlace = 1;
+            int numActive = 0;
+            int si;
+
+            // Build sorted player array by score descending
+            memcpy(sortedHUD, g_Players, sizeof(sortedHUD));
+            for (si = 0; si < MAX_PLAYERS; si++)
+            {
+                sortedHUD[si].totalScore = sortedHUD[si].numPoints - sortedHUD[si].numDeaths;
+                if (sortedHUD[si].totalScore < 0) sortedHUD[si].totalScore = 0;
+            }
+            sortPlayersByScore(sortedHUD);
+
+            // Count active players and find local player's place
+            for (si = 0; si < MAX_PLAYERS; si++)
+            {
+                bool isActive = false;
+                int pid = sortedHUD[si].playerID;
+                int ri;
+
+                // Check if this player is in the game roster
+                for (ri = 0; ri < nd->game_roster_count && ri < FNET_MAX_PLAYERS; ri++)
+                {
+                    if (nd->game_roster[ri].active && nd->game_roster[ri].id == (uint8_t)pid)
+                    {
+                        isActive = true;
+                        break;
+                    }
+                }
+
+                if (!isActive) continue;
+                numActive++;
+
+                if (pid == g_Game.myPlayerID)
+                    myPlace = numActive;
+            }
+
+            // Draw scoreboard table rows (top-left)
+            {
+                int row = 0;
+                font_draw("#  NAME     PTS", FONT_X(1), FONT_Y(1), 600);
+
+                for (si = 0; si < MAX_PLAYERS && row < 12; si++)
+                {
+                    bool isActive = false;
+                    int pid = sortedHUD[si].playerID;
+                    const char* pname = "";
+                    const char* status = "";
+                    int ri;
+
+                    for (ri = 0; ri < nd->game_roster_count && ri < FNET_MAX_PLAYERS; ri++)
+                    {
+                        if (nd->game_roster[ri].active && nd->game_roster[ri].id == (uint8_t)pid)
+                        {
+                            isActive = true;
+                            pname = nd->game_roster[ri].name;
+                            break;
+                        }
+                    }
+
+                    if (!isActive) continue;
+
+                    if (sortedHUD[si].state == FLICKYSTATE_DYING ||
+                        sortedHUD[si].state == FLICKYSTATE_DEAD)
+                        status = "X";
+                    else
+                        status = "";
+
+                    // Draw small bird sprite in the row
+                    jo_sprite_draw3D(g_FlickySprites[sortedHUD[si].spriteID % MAX_FLICKY_SPRITES].up,
+                                     FONT_X(4), FONT_Y(2 + row) + 4, 600);
+
+                    // Highlight local player with '>' marker
+                    if (pid == g_Game.myPlayerID ||
+                        (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2))
+                    {
+                        font_printf(FONT_X(1), FONT_Y(2 + row), 600,
+                                    ">%d %-8.8s %3d %s",
+                                    row + 1, pname, sortedHUD[si].numPoints, status);
+                    }
+                    else
+                    {
+                        font_printf(FONT_X(1), FONT_Y(2 + row), 600,
+                                    "%2d %-8.8s %3d %s",
+                                    row + 1, pname, sortedHUD[si].numPoints, status);
+                    }
+
+                    row++;
+                }
+            }
+
+            // Draw BIG place number (top-right)
+            {
+                int placeOnes = myPlace % 10;
+                int placeTens = myPlace / 10;
+
+                jo_sprite_change_sprite_scale(3.0);
+                if (placeTens > 0)
+                {
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens], 120, -96, 600);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 148, -96, 600);
+                }
+                else
+                {
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 134, -96, 600);
+                }
+                jo_sprite_change_sprite_scale(1.0);
+
+                // Draw "#" label above the place number
+                font_draw("#", 130, FONT_Y(1), 600);
+            }
+        }
     }
     else
     {
-        jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 0, -76, 502);
+        // Offline mode: show top score
+        topScore = getTopScore();
+        hunds = (topScore/100);
+        tens = (topScore/10) % 10;
+        ones = topScore % 10;
+
+        if(topScore >= VICTORY_CONDITION)
+        {
+            g_Game.topScore = topScore;
+            transitionToGameOverOrPause(false);
+            return;
+        }
+
+        if(hunds != 0)
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[hunds], -16, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], 0, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 16, -76, 502);
+        }
+        else if(tens != 0)
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[tens], -8, -76, 502);
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 8, -76, 502);
+        }
+        else
+        {
+            jo_sprite_draw3D(g_Assets.largeDigitSprites[ones], 0, -76, 502);
+        }
     }
 
     return;
@@ -1403,6 +1558,22 @@ void gameplay_checkForCollisions(void)
                     if (isP2[li]) fnet_send_player_death_p2();
                     else fnet_send_player_death();
                     break;
+                }
+            }
+
+            // powerup collision (client-authoritative, matching offline pattern)
+            if (g_Players[i].state == FLICKYSTATE_FLYING)
+            {
+                for (int j = 0; j < MAX_POWER_UPS; j++)
+                {
+                    if (g_PowerUps[j].state != POWERUP_INITIALIZED) continue;
+
+                    result = checkForFlickyPowerUpCollisions(&g_Players[i], &g_PowerUps[j]);
+                    if (result)
+                    {
+                        applyPowerUp(&g_Players[i], &g_PowerUps[j]);
+                        fnet_send_powerup_collect(j);
+                    }
                 }
             }
         }

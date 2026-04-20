@@ -272,4 +272,7 @@ void fnet_send_player_death(void);
 /** Report P2 co-op player death to server. */
 void fnet_send_player_death_p2(void);
 
+/** Report local player collected a powerup to server. */
+void fnet_send_powerup_collect(int slot);
+
 #endif /* FLOCK_NET_H */

@@ -54,6 +54,7 @@
 #define FNET_MSG_LEADERBOARD_REQ   0x1B  /* Client requests leaderboard (no payload) */
 #define FNET_MSG_CLIENT_DEATH      0x1C  /* Client reports own death (no payload) */
 #define FNET_MSG_CLIENT_DEATH_P2   0x1D  /* Client reports P2 death [player_id:1] */
+#define FNET_MSG_CLIENT_POWERUP_COLLECT 0x1E /* Client collected powerup [slot:1] */
 
 /*============================================================================
  * Flicky's Flock Server -> Client Messages (0xA0 - 0xBF)
@@ -407,6 +408,16 @@ static inline int fnet_encode_client_death_p2(uint8_t* buf, uint8_t player_id)
     buf[1] = 0x02;  /* payload = type(1) + player_id(1) */
     buf[2] = FNET_MSG_CLIENT_DEATH_P2;
     buf[3] = player_id;
+    return 4;
+}
+
+/** Encode CLIENT_POWERUP_COLLECT: report local player collected a powerup. */
+static inline int fnet_encode_client_powerup_collect(uint8_t* buf, uint8_t slot)
+{
+    buf[0] = 0x00;
+    buf[1] = 0x02;  /* payload = type(1) + slot(1) */
+    buf[2] = FNET_MSG_CLIENT_POWERUP_COLLECT;
+    buf[3] = slot;
     return 4;
 }
 
