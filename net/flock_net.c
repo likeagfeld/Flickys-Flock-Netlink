@@ -247,6 +247,37 @@ static void process_lobby_state(const uint8_t* payload, int len)
     for (; i < FNET_MAX_PLAYERS; i++) {
         g_net.lobby_players[i].active = false;
     }
+
+    /* Sync my_ready from the authoritative roster. Prevents stale
+     * client state after game-over / reconnect from causing START to
+     * un-ready us. Match on player ID first, then fall back to name. */
+    {
+        int k, j;
+        bool matched = false;
+        if (g_net.my_player_id < MAX_PLAYERS) {
+            for (k = 0; k < g_net.lobby_count && k < FNET_MAX_PLAYERS; k++) {
+                if (g_net.lobby_players[k].active &&
+                    g_net.lobby_players[k].id == g_net.my_player_id) {
+                    g_net.my_ready = g_net.lobby_players[k].ready;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched && g_net.my_name[0] != '\0') {
+            for (k = 0; k < g_net.lobby_count && k < FNET_MAX_PLAYERS; k++) {
+                if (!g_net.lobby_players[k].active) continue;
+                for (j = 0; j < FNET_MAX_NAME; j++) {
+                    if (g_net.my_name[j] != g_net.lobby_players[k].name[j]) break;
+                    if (g_net.my_name[j] == '\0') break;
+                }
+                if (g_net.my_name[j] == g_net.lobby_players[k].name[j]) {
+                    g_net.my_ready = g_net.lobby_players[k].ready;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 static void process_game_start(const uint8_t* payload, int len)
@@ -348,6 +379,12 @@ static void process_game_over(const uint8_t* payload, int len)
     }
     g_net.has_last_results = true;
 
+    /* Server resets ready state when returning to lobby after a game.
+     * Clear our local mirror so A (toggle) and START (auto-ready) stay
+     * in sync with the server -- otherwise the first A/START press
+     * flips our stale `true` to `false` and accidentally unreadies. */
+    g_net.my_ready = false;
+
     /* Return network state to lobby */
     g_net.state = FNET_STATE_LOBBY;
     g_net.status_msg = "In Lobby";
@@ -391,6 +428,18 @@ static void process_player_sync(const uint8_t* payload, int len)
     g_Players[pid].totalScore = (int)points - (int)deaths;
     if (g_Players[pid].totalScore < 0) g_Players[pid].totalScore = 0;
     g_Players[pid].spriteID = (int)sprite % MAX_FLICKY_SPRITES;
+
+    /* Keep the remote alive/dead status in sync so the spectator
+     * scoreboard reflects reality even if a discrete KILL or SPAWN
+     * message was lost. Only update state between FLYING and DEAD
+     * endpoints -- don't step on a locally-running DYING animation
+     * (let the death animation finish naturally on our screen). */
+    if (g_Players[pid].state != FLICKYSTATE_DYING) {
+        if (state == FLICKYSTATE_FLYING ||
+            state == FLICKYSTATE_DEAD) {
+            g_Players[pid].state = state;
+        }
+    }
 }
 
 static void process_pipe_spawn(const uint8_t* payload, int len)

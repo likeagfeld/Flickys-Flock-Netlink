@@ -989,12 +989,25 @@ void gameplay_draw(void)
             }
             sortPlayersByScore(sortedHUD);
 
-            // Count active players and find local player's place
+            // Count active players and find each local player's place.
+            // Standard competition ranking (1, 2, 2, 4): tied scores
+            // share the rank of the highest of them. This gives the
+            // intuitive "tied for 1st" feel when all scores are 0 at
+            // game start, rather than arbitrarily picking P1 over P2.
+            int rank = 0;
+            int prevScore = -1;
+            int aliveRemote = 0;    // alive remote (non-local) players
+            int aliveLocal = 0;     // alive local players (1-2)
             for (si = 0; si < MAX_PLAYERS; si++)
             {
                 bool isActive = false;
                 int pid = sortedHUD[si].playerID;
                 int ri;
+                bool isLocalHere = (pid == g_Game.myPlayerID) ||
+                                   (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2);
+                bool isAlive = (sortedHUD[si].state != FLICKYSTATE_DYING &&
+                                sortedHUD[si].state != FLICKYSTATE_DEAD &&
+                                sortedHUD[si].state != FLICKYSTATE_UNINITIALIZED);
 
                 for (ri = 0; ri < nd->game_roster_count && ri < FNET_MAX_PLAYERS; ri++)
                 {
@@ -1008,10 +1021,21 @@ void gameplay_draw(void)
                 if (!isActive) continue;
                 numActive++;
 
+                // Standard competition ranking with ties
+                if (numActive == 1 || sortedHUD[si].totalScore != prevScore)
+                    rank = numActive;
+                prevScore = sortedHUD[si].totalScore;
+
+                if (isAlive)
+                {
+                    if (isLocalHere) aliveLocal++;
+                    else             aliveRemote++;
+                }
+
                 if (pid == g_Game.myPlayerID)
-                    myPlace = numActive;
+                    myPlace = rank;
                 if (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2)
-                    myPlace2 = numActive;
+                    myPlace2 = rank;
             }
 
             // Draw scoreboard table rows (top-left)
@@ -1070,45 +1094,69 @@ void gameplay_draw(void)
                 }
             }
 
-            // Draw BIG place number for P1 (top-right)
+            // Draw place number for P1 (top-right, compact).
+            // Digit sprite source is 16x16; at scale 1.25 it renders
+            // as 20x20, roughly half the previous 2.5x footprint so it
+            // no longer collides with the scoreboard or gameplay area.
             {
                 int placeOnes = myPlace % 10;
                 int placeTens = myPlace / 10;
+                bool p1Alive = (g_Players[g_Game.myPlayerID].state != FLICKYSTATE_DEAD &&
+                                g_Players[g_Game.myPlayerID].state != FLICKYSTATE_DYING);
 
-                jo_sprite_change_sprite_scale(2.5);
+                font_draw("P1", FONT_X(32), FONT_Y(1), 500);
+                jo_sprite_change_sprite_scale(1.25);
                 if (placeTens > 0)
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens], 118, -56, 500);
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 142, -56, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens], 128, -88, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 146, -88, 500);
                 }
                 else
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 130, -56, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes], 137, -88, 500);
                 }
                 jo_sprite_change_sprite_scale(1.0);
 
-                font_draw("P1#", FONT_X(35), FONT_Y(1), 500);
+                if (!p1Alive)
+                    font_draw("OUT", FONT_X(32), FONT_Y(10), 500);
             }
 
-            // Draw BIG place number for P2 (below P1, if co-op)
+            // Draw place number for P2 (below P1, if co-op)
             if (g_Game.hasSecondLocal && g_Game.myPlayerID2 != 0xFF)
             {
                 int placeOnes2 = myPlace2 % 10;
                 int placeTens2 = myPlace2 / 10;
+                bool p2Alive = (g_Players[g_Game.myPlayerID2].state != FLICKYSTATE_DEAD &&
+                                g_Players[g_Game.myPlayerID2].state != FLICKYSTATE_DYING);
 
-                jo_sprite_change_sprite_scale(2.5);
+                font_draw("P2", FONT_X(32), FONT_Y(13), 500);
+                jo_sprite_change_sprite_scale(1.25);
                 if (placeTens2 > 0)
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens2], 118, -16, 500);
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 142, -16, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeTens2], 128, 8, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 146, 8, 500);
                 }
                 else
                 {
-                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 130, -16, 500);
+                    jo_sprite_draw3D(g_Assets.largeDigitSprites[placeOnes2], 137, 8, 500);
                 }
                 jo_sprite_change_sprite_scale(1.0);
 
-                font_draw("P2#", FONT_X(35), FONT_Y(6), 500);
+                if (!p2Alive)
+                    font_draw("OUT", FONT_X(32), FONT_Y(22), 500);
+            }
+
+            // Spectator banner: when all local players are out but the
+            // game is still running on other clients, make it obvious
+            // the session is live and surface the remaining-alive count
+            // so the user can follow the action instead of wondering if
+            // the game has frozen.
+            if (aliveLocal == 0 && aliveRemote > 0)
+            {
+                font_draw_centered("-- SPECTATING --", FONT_Y(25), 600);
+                font_printf_centered(FONT_Y(26), 600,
+                                     "%d FLOCKMATE%s STILL FLYING",
+                                     aliveRemote, (aliveRemote == 1) ? "" : "S");
             }
         }
     }

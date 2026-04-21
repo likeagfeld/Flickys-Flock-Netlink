@@ -71,10 +71,31 @@ void lobby_input(void)
         g_Game.input.pressedABC = false;
     }
 
-    /* START = request game start (auto-ready if not already) */
+    /* START = request game start (auto-ready if not already).
+     * Check authoritative server roster for our ready state rather
+     * than relying on the local mirror, which can go stale after
+     * a game ends and the server resets ready flags. Otherwise we
+     * risk toggling ourselves back to NOT READY on the START press. */
     if (jo_is_pad1_key_pressed(JO_KEY_START)) {
         if (g_Game.input.pressedStart == false) {
-            if (!fnet_is_ready()) {
+            const fnet_state_data_t* nd = fnet_get_data();
+            bool server_says_ready = false;
+            int k, j;
+
+            /* Find ourselves in the lobby roster by name */
+            for (k = 0; k < nd->lobby_count && k < FNET_MAX_PLAYERS; k++) {
+                if (!nd->lobby_players[k].active) continue;
+                for (j = 0; j < FNET_MAX_NAME; j++) {
+                    if (g_Game.playerName[j] != nd->lobby_players[k].name[j]) break;
+                    if (g_Game.playerName[j] == '\0') break;
+                }
+                if (g_Game.playerName[j] == nd->lobby_players[k].name[j]) {
+                    server_says_ready = nd->lobby_players[k].ready;
+                    break;
+                }
+            }
+
+            if (!server_says_ready && !fnet_is_ready()) {
                 fnet_send_ready();
             }
             fnet_send_start_game();
