@@ -110,6 +110,7 @@ FNET_MSG_LOG = 0xA6
 FNET_MSG_PAUSE_ACK = 0xA7
 FNET_MSG_PLAYER_SYNC = 0xA9
 FNET_MSG_PIPE_SPAWN = 0xAA
+FNET_MSG_PIPE_SPEED = 0xAB
 FNET_MSG_POWERUP_SPAWN = 0xAC
 FNET_MSG_PLAYER_KILL = 0xAE
 FNET_MSG_PLAYER_SPAWN = 0xAF
@@ -117,6 +118,7 @@ FNET_MSG_SCORE_UPDATE = 0xB0
 FNET_MSG_POWERUP_EFFECT = 0xB1
 FNET_MSG_LEADERBOARD_DATA = 0xB2
 FNET_MSG_LOCAL_PLAYER_ACK = 0xB3
+FNET_MSG_PIPE_RESYNC = 0xB4
 
 # Input bitmask (matches flock_protocol.h)
 INPUT_FLAP = 1 << 0
@@ -314,6 +316,25 @@ def build_pipe_spawn(slot: int, x: int, y: int, gap: int,
     return encode_frame(payload)
 
 
+def build_pipe_speed(pipe_speed: int) -> bytes:
+    """[speed:2 BE] - authoritative pipe_speed (fixed-point 8.8)."""
+    payload = bytes([FNET_MSG_PIPE_SPEED])
+    payload += struct.pack("!H", pipe_speed & 0xFFFF)
+    return encode_frame(payload)
+
+
+def build_pipe_resync(pipes: list) -> bytes:
+    """[count:1]{ [slot:1][x:2s][active:1] }*count
+    Snapshot of all pipe slots so clients can correct any x-drift."""
+    count = len(pipes)
+    payload = bytes([FNET_MSG_PIPE_RESYNC, count & 0xFF])
+    for slot, pipe in enumerate(pipes):
+        payload += bytes([slot & 0xFF])
+        payload += struct.pack("!h", _clamp16(pipe.x_pos))
+        payload += bytes([1 if pipe.active else 0])
+    return encode_frame(payload)
+
+
 def build_powerup_spawn(slot: int, pu_type: int, x: int, y: int) -> bytes:
     """[slot:1][type:1][x:2][y:2s]"""
     payload = bytes([FNET_MSG_POWERUP_SPAWN, slot & 0xFF])
@@ -444,6 +465,10 @@ class GameSimulation:
         # Progressive speed: fixed-point 8.8 (256 = 1.0 pixel/frame)
         self.pipe_speed = PIPE_SPEED_BASE
         self.pipe_speed_accum = 0
+
+        # Periodic pipe resync broadcast -- fires every N server ticks
+        # (~1s at 20Hz) so clients can correct any pipe x-drift.
+        self.pipe_resync_counter = 0
 
         # Track which player IDs are bots (collision is server-authoritative
         # only for bots; human players report their own deaths)
@@ -756,10 +781,14 @@ class GameSimulation:
                         p.num_points += 1
                         events.append(("score_update", pid,
                                         p.num_points, p.num_deaths))
-                        # Progressive speed: increase once per pipe (first scorer only)
+                        # Progressive speed: increase once per pipe (first scorer only).
+                        # Emit an authoritative pipe_speed event so every client
+                        # slams its local value to match -- prevents the tiny
+                        # per-bump drift that made pipes vanish mid-screen.
                         if not pipe.speed_bumped:
                             pipe.speed_bumped = True
                             self.pipe_speed += PIPE_SPEED_PER_GATE
+                            events.append(("pipe_speed", self.pipe_speed))
 
                     # Collision with pipe -- only for bots
                     if pid in self.bot_ids:
@@ -860,6 +889,18 @@ class GameSimulation:
                     if p.death_timer <= -SPAWN_FRAME_TIMER:
                         self._respawn_player(pid)
                         final_events.append(("player_spawn", pid))
+
+        # Periodic pipe resync: broadcast authoritative x positions for
+        # every slot every 20 ticks (~1 second at 20 Hz). Corrects any
+        # residual drift from fixed-point accumulator mismatch so clients
+        # can't fall out of sync over the course of a match.
+        self.pipe_resync_counter += 1
+        if self.pipe_resync_counter >= 20:
+            self.pipe_resync_counter = 0
+            final_events.append(("pipe_resync", list(self.pipes)))
+            # Also re-send the current pipe_speed so any client that
+            # missed the bump event realigns.
+            final_events.append(("pipe_speed", self.pipe_speed))
 
         return final_events
 
@@ -2412,6 +2453,16 @@ class FlockServer:
         elif evt[0] == "score_update":
             _, pid, points, deaths = evt
             msg = build_score_update(pid, points, deaths)
+            self._broadcast_to_game(msg)
+
+        elif evt[0] == "pipe_speed":
+            _, speed = evt
+            msg = build_pipe_speed(speed)
+            self._broadcast_to_game(msg)
+
+        elif evt[0] == "pipe_resync":
+            _, pipes = evt
+            msg = build_pipe_resync(pipes)
             self._broadcast_to_game(msg)
 
         elif evt[0] == "powerup_effect":

@@ -70,6 +70,8 @@
 #define FNET_MSG_PAUSE_ACK         0xA7  /* [paused:1] */
 #define FNET_MSG_PLAYER_SYNC       0xA9  /* [player_id:1][y:2s][y_speed:2s][state:1][points:2][deaths:2][sprite:1] */
 #define FNET_MSG_PIPE_SPAWN        0xAA  /* [slot:1][x:2][y:2s][gap:1][sections:1][top_y:2s] */
+#define FNET_MSG_PIPE_SPEED        0xAB  /* [speed:2 BE] - authoritative pipe_speed (8.8 fixed) */
+#define FNET_MSG_PIPE_RESYNC       0xB4  /* [count:1]{slot:1,x:2s,active:1}... */
 #define FNET_MSG_POWERUP_SPAWN     0xAC  /* [slot:1][type:1][x:2][y:2s] */
 #define FNET_MSG_PLAYER_KILL       0xAE  /* [player_id:1] */
 #define FNET_MSG_PLAYER_SPAWN      0xAF  /* [player_id:1] */

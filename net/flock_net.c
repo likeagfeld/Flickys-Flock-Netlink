@@ -470,6 +470,63 @@ static void process_pipe_spawn(const uint8_t* payload, int len)
     g_Pipes[slot].scoredBy = 0;
 }
 
+/* Authoritative pipe_speed broadcast. Server sends whenever its
+ * pipe_speed ratchet advances (once per pipe first-scored). Client
+ * slams the local value to match -- no local ratcheting, no drift. */
+static void process_pipe_speed(const uint8_t* payload, int len)
+{
+    uint16_t speed;
+
+    /* [type:1][speed:2 BE] = 3 */
+    if (len < 3) return;
+
+    speed = ((uint16_t)payload[1] << 8) | (uint16_t)payload[2];
+    g_Game.pipeSpeed = (int)speed;
+}
+
+/* Authoritative pipe position resync. Server broadcasts every ~60
+ * frames (1 second) so any residual fixed-point drift between client
+ * and server gets corrected -- prevents the "gate vanishing mid-screen"
+ * symptom where a desynced client sees PIPE_SPAWN overwrite a slot
+ * whose old pipe was still on-screen locally.
+ *
+ * Payload: [type:1][count:1]{ [slot:1][x:2s][active:1] }*count
+ * Each entry = 4 bytes. */
+static void process_pipe_resync(const uint8_t* payload, int len)
+{
+    int off = 2;
+    int count;
+    int i;
+
+    if (len < 2) return;
+    count = payload[1];
+    if (count > MAX_PIPES) count = MAX_PIPES;
+
+    for (i = 0; i < count; i++) {
+        uint8_t slot, active;
+        int16_t x;
+        if (off + 4 > len) break;
+        slot = payload[off + 0];
+        x    = read_i16(&payload[off + 1]);
+        active = payload[off + 3];
+        off += 4;
+        if (slot >= MAX_PIPES) continue;
+
+        if (active) {
+            /* Trust the server's x. Leave y/gap/sections alone -- those
+             * come from the original PIPE_SPAWN and don't change. If
+             * the slot has never been spawned locally, ignore (we'll
+             * get the real PIPE_SPAWN shortly). */
+            if (g_Pipes[slot].state == PIPESTATE_INITIALIZED) {
+                g_Pipes[slot].x_pos = (int)x;
+            }
+        } else {
+            /* Server says slot is inactive -- drop it locally. */
+            g_Pipes[slot].state = PIPESTATE_UNINITIALIZED;
+        }
+    }
+}
+
 static void process_powerup_spawn(const uint8_t* payload, int len)
 {
     uint8_t slot, type;
@@ -555,21 +612,11 @@ static void process_score_update(const uint8_t* payload, int len)
         }
     }
 
-    /* Track point changes to drive progressive speed. Previously we
-     * only bumped for local scorers, so when a remote player scored
-     * the server's pipe_speed rose while the client's stayed put --
-     * client pipes fell behind, slots recycled before client pipes
-     * cleared the screen, and PIPE_SPAWN overwrote a still-visible
-     * slot (gates "disappearing"). Bump on ANY scorer to stay in
-     * sync with the server's speed ratchet. */
-    {
-        int old_points = g_Players[pid].numPoints;
-        int new_points = (int)points;
-        if (new_points > old_points) {
-            /* +64 per gate in fixed-point 8.8 (~25% of base per gate) */
-            g_Game.pipeSpeed += 64 * (new_points - old_points);
-        }
-    }
+    /* pipe_speed is now server-authoritative via FNET_MSG_PIPE_SPEED.
+     * Do NOT bump locally here -- the server bumps ONCE per pipe (first
+     * scorer only), but this handler fires for every score_update, so
+     * any local bumping would over- or under-count relative to the
+     * server and cause pipe-position desync. */
 
     g_Players[pid].numPoints = (int)points;
     g_Players[pid].numDeaths = (int)deaths;
@@ -831,6 +878,14 @@ static void process_message(const uint8_t* payload, int len)
 
     case FNET_MSG_PIPE_SPAWN:
         process_pipe_spawn(payload, len);
+        break;
+
+    case FNET_MSG_PIPE_SPEED:
+        process_pipe_speed(payload, len);
+        break;
+
+    case FNET_MSG_PIPE_RESYNC:
+        process_pipe_resync(payload, len);
         break;
 
     case FNET_MSG_POWERUP_SPAWN:
