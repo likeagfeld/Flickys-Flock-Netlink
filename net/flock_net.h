@@ -153,6 +153,21 @@ typedef struct {
     uint16_t send_cooldown_p2;
     int player_state_cooldown_p2;
 
+    /* Client-authoritative death retry: if the CLIENT_DEATH packet is
+     * dropped, the server keeps us in FLYING state and will happily
+     * score us every gate forever. Retry a few times until either the
+     * server acknowledges (our numDeaths ticks up) or the retry budget
+     * is exhausted.
+     *
+     * death_pending_*: frames remaining to resend; <= 0 means no retry
+     * death_expected_deaths_*: our numDeaths at the moment we sent the
+     *   first CLIENT_DEATH; we stop retrying once server numDeaths > this.
+     */
+    int death_retry_timer;
+    int death_retry_timer_p2;
+    int death_expected_deaths;
+    int death_expected_deaths_p2;
+
     /* Timers */
     int heartbeat_counter;
     int frame_count;

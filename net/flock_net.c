@@ -538,11 +538,30 @@ static void process_score_update(const uint8_t* payload, int len)
     points = read_u16(&payload[2]);
     deaths = read_u16(&payload[4]);
 
-    /* Track point changes to increase progressive speed.
-     * Only bump speed for local player scores to match server's
-     * once-per-pipe speed bump (server bumps on first scorer per pipe). */
-    if (pid == g_Game.myPlayerID ||
-        (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2))
+    /* Reject ghost-scoring: if the server still thinks a local player
+     * is alive (e.g. the CLIENT_DEATH packet was dropped) it will keep
+     * broadcasting rising point totals. Don't let those inflate the
+     * HUD while we know we're locally dying/dead -- the death retry
+     * will re-send CLIENT_DEATH shortly. Accept the deaths field so
+     * we still learn when the server eventually catches up. */
+    {
+        bool isLocalDead =
+            ((pid == g_Game.myPlayerID) ||
+             (g_Game.hasSecondLocal && pid == g_Game.myPlayerID2)) &&
+            (g_Players[pid].state == FLICKYSTATE_DYING ||
+             g_Players[pid].state == FLICKYSTATE_DEAD);
+        if (isLocalDead && (int)points > g_Players[pid].numPoints) {
+            points = (uint16_t)g_Players[pid].numPoints;
+        }
+    }
+
+    /* Track point changes to drive progressive speed. Previously we
+     * only bumped for local scorers, so when a remote player scored
+     * the server's pipe_speed rose while the client's stayed put --
+     * client pipes fell behind, slots recycled before client pipes
+     * cleared the screen, and PIPE_SPAWN overwrote a still-visible
+     * slot (gates "disappearing"). Bump on ANY scorer to stay in
+     * sync with the server's speed ratchet. */
     {
         int old_points = g_Players[pid].numPoints;
         int new_points = (int)points;
@@ -908,6 +927,47 @@ void fnet_tick(void)
         len = fnet_encode_heartbeat(g_net.tx_buf);
         net_transport_send(g_net.transport, g_net.tx_buf, len);
     }
+
+    /* Death retry: if the initial CLIENT_DEATH was dropped, the server
+     * keeps us FLYING and scores ghost gates. Resend every ~20 frames
+     * until the server acknowledges by ticking our numDeaths up, or
+     * until the retry budget expires. */
+    if (g_net.state == FNET_STATE_PLAYING) {
+        if (g_net.death_retry_timer > 0) {
+            if (g_net.my_player_id < MAX_PLAYERS &&
+                g_Players[g_net.my_player_id].numDeaths >
+                    g_net.death_expected_deaths) {
+                /* Server acknowledged -- stop retrying. */
+                g_net.death_retry_timer = 0;
+            } else {
+                g_net.death_retry_timer--;
+                if ((g_net.death_retry_timer % 20) == 0) {
+                    len = fnet_encode_client_death(g_net.tx_buf);
+                    net_transport_send(g_net.transport, g_net.tx_buf, len);
+                }
+            }
+        }
+        if (g_net.death_retry_timer_p2 > 0) {
+            if (g_Game.myPlayerID2 != 0xFF &&
+                g_Game.myPlayerID2 < MAX_PLAYERS &&
+                g_Players[g_Game.myPlayerID2].numDeaths >
+                    g_net.death_expected_deaths_p2) {
+                g_net.death_retry_timer_p2 = 0;
+            } else {
+                g_net.death_retry_timer_p2--;
+                if ((g_net.death_retry_timer_p2 % 20) == 0 &&
+                    g_Game.myPlayerID2 != 0xFF) {
+                    len = fnet_encode_client_death_p2(g_net.tx_buf,
+                                                       g_Game.myPlayerID2);
+                    net_transport_send(g_net.transport, g_net.tx_buf, len);
+                }
+            }
+        }
+    } else {
+        /* Leaving gameplay: clear death retry state. */
+        g_net.death_retry_timer = 0;
+        g_net.death_retry_timer_p2 = 0;
+    }
 }
 
 /*============================================================================
@@ -1099,6 +1159,15 @@ void fnet_send_player_death(void)
     if (g_net.state != FNET_STATE_PLAYING || !g_net.transport) return;
     len = fnet_encode_client_death(g_net.tx_buf);
     net_transport_send(g_net.transport, g_net.tx_buf, len);
+
+    /* Arm retry: if this packet is dropped, the server never transitions
+     * us to DYING and will keep scoring ghost gates forever. Capture our
+     * current numDeaths as the baseline; retry until server bumps it.
+     * 90 frames @ 60fps = 1.5s, with a resend every ~20 frames. */
+    if (g_net.my_player_id < MAX_PLAYERS) {
+        g_net.death_expected_deaths = g_Players[g_net.my_player_id].numDeaths;
+    }
+    g_net.death_retry_timer = 90;
 }
 
 void fnet_send_player_death_p2(void)
@@ -1108,6 +1177,11 @@ void fnet_send_player_death_p2(void)
     if (g_Game.myPlayerID2 == 0xFF) return;
     len = fnet_encode_client_death_p2(g_net.tx_buf, g_Game.myPlayerID2);
     net_transport_send(g_net.transport, g_net.tx_buf, len);
+
+    if (g_Game.myPlayerID2 < MAX_PLAYERS) {
+        g_net.death_expected_deaths_p2 = g_Players[g_Game.myPlayerID2].numDeaths;
+    }
+    g_net.death_retry_timer_p2 = 90;
 }
 
 void fnet_send_powerup_collect(int slot)
