@@ -4,8 +4,6 @@
 
 ---
 
-# Disclaimer - Online Netlink functionality has been implemented with assistance of AI (Claude).
-
 ## Online Multiplayer (NetLink)
 Flicky's Flock now supports online multiplayer via the Sega Saturn NetLink modem. Up to 12 players can connect to a central server and play cooperatively or competitively over the internet.
 
@@ -54,14 +52,14 @@ If you have a [DreamPi](https://github.com/Kazade/dreampi) (Raspberry Pi with US
    sudo systemctl restart dreampi
    ```
 
-The `netlink_config.ini` maps the dial code `199404` to the Flicky's Flock server. No bridge script is needed - DreamPi's default `netlink.py` handles the connection.
+The `netlink_config.ini` maps the dial code  to the Flicky's Flock server. No bridge script is needed - DreamPi's default `netlink.py` handles the connection.
 
 ### Online Setup - PC (eaudnord's NetLink script)
 
 If you're using a PC with eaudnord's NetLink script instead of a DreamPi:
 
 1. Replace your `netlink_config.ini` with the one from `tools/dreampi/netlink_config.ini`
-2. The config maps dial code `199404` to `saturncoup.duckdns.org:4824`
+2. The config maps dial code  to 
 3. Connect your USB modem to your PC and your Saturn NetLink via phone cable
 4. Run the NetLink script as normal
 
