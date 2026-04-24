@@ -1,3 +1,9 @@
+# Flicky's Flock — NetLink Edition
+
+> 💝 **Huge thanks to [Slinga](https://github.com/slinga-homebrew)** for the original Flicky's Flock — the Sonic-themed Flappy Bird clone, the 12-player chaos, the sprites, the sound, the entire Saturn homebrew foundation this fork builds on. This port only *adds* a networking layer; every line of the original game and every asset is Slinga's. If you enjoy this online port, go star the upstream repo: https://github.com/slinga-homebrew/Flickys-Flock
+
+---
+
 # Disclaimer - Online Netlink functionality has been implemented with assistance of AI (Claude).
 
 ## Online Multiplayer (NetLink)
