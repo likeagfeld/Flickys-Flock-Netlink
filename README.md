@@ -73,7 +73,6 @@ python fserver.py
 ```
 
 Options:
-- `--port PORT` - TCP listen port (default: 4824)
 - `--bots N` - Number of AI bot players to add at startup (default: 0)
 - `--verbose` - Enable debug logging
 
